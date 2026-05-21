@@ -10,11 +10,9 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-_SEARCH_URLS = [
-    "https://www.bilweb.se/bilar/volvo/v60/",
-    "https://www.bilweb.se/bilar/volvo/v90/",
-    "https://www.bilweb.se/bilar/volvo/xc60/",
-]
+_SEARCH_MODELS = ["v60", "v90", "xc60"]
+_BASE_SEARCH_URL = "https://www.bilweb.se/begagnade-bilar/volvo"
+_WARMUP_URL = "https://www.bilweb.se/"
 
 _MODEL_PATTERNS = {
     "V60": re.compile(r"\bV60\b", re.IGNORECASE),
@@ -98,20 +96,28 @@ class BilwebScraper(BaseScraper):
 
     async def fetch(self) -> list[dict]:
         """Fetch car listings from Bilweb for each model."""
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
-        for search_url in _SEARCH_URLS:
+        for model in _SEARCH_MODELS:
             page = 1
             while True:
-                url = search_url if page == 1 else f"{search_url}?page={page}"
-                cached = self.cache.get(url)
+                url = f"{_BASE_SEARCH_URL}/{model}"
+                params = {"page": str(page)} if page > 1 else None
+                cache_key = f"bilweb:{model}:page{page}"
+                cached = self.cache.get(cache_key)
                 if cached is not None:
                     html = cached
                 else:
-                    html = await self.http_client.get_text(url)
+                    html = await self.http_client.get_text(url, params=params)
                     if html:
-                        self.cache.set(url, html)
+                        self.cache.set(cache_key, html)
 
                 if not html:
+                    self.logger.warning(json.dumps({
+                        "event": "fetch_empty", "scraper": self.NAME,
+                        "model": model, "page": page,
+                    }))
                     break
 
                 all_items.append({"html": html, "base_url": self.BASE_URL})
@@ -140,6 +146,10 @@ class BilwebScraper(BaseScraper):
                 )
 
                 if not cards:
+                    self.logger.info(json.dumps({
+                        "event": "no_cards_found", "scraper": self.NAME,
+                        "html_snippet": soup.body.get_text(" ", strip=True)[:300] if soup.body else "",
+                    }))
                     continue
 
                 for card in cards:
