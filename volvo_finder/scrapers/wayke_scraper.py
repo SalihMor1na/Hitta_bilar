@@ -1,4 +1,4 @@
-"""Wayke.se scraper using public HTML search pages."""
+"""Wayke.se scraper — correct URL verified in browser."""
 import json
 import re
 from typing import Optional
@@ -11,14 +11,14 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 from utils.nextjs import extract_next_data, find_listings_in_next_data
 
-# Public search URL — same as any browser
-_BASE_SEARCH_URL = "https://www.wayke.se/hitta-bil"
-_MODELS = ["v60", "v90", "xc60"]
+# Correct URL verified by user in Chrome
+_BASE_SEARCH_URL = "https://www.wayke.se/sok"
+_SEARCH_MODELS = ["V60", "V90", "XC60"]
 _WARMUP_URL = "https://www.wayke.se/"
-_SEARCH_PARAMS = {
-    "makes": "Volvo",
-    "priceMax": "300000",
-    "yearMin": "2018",
+_BASE_PARAMS = {
+    "mileage.max": "16000",
+    "modelYear.min": "2018",
+    "price.max": "300000",
 }
 
 _FEATURE_KEYWORDS = {
@@ -78,15 +78,14 @@ class WaykeScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch Volvo listings from Wayke using public HTML search."""
+        """Fetch Volvo listings from Wayke using verified /sok URL."""
         await self.http_client.warm_up(_WARMUP_URL)
-
         all_items: list[dict] = []
 
-        for model in _MODELS:
+        for model in _SEARCH_MODELS:
             page = 1
             while page <= 10:
-                params = {**_SEARCH_PARAMS, "models": model.upper(), "page": str(page)}
+                params = {**_BASE_PARAMS, "modelSeries": model, "page": str(page)}
                 cache_key = f"wayke:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
@@ -97,12 +96,9 @@ class WaykeScraper(BaseScraper):
                         self.cache.set(cache_key, html)
 
                 if not html:
-                    self.logger.warning(json.dumps({
-                        "event": "wayke_fetch_empty", "model": model, "page": page,
-                    }))
+                    self.logger.warning(json.dumps({"event": "wayke_fetch_empty", "model": model, "page": page}))
                     break
 
-                # Try __NEXT_DATA__ first
                 next_data = None
                 try:
                     next_data = extract_next_data(html)
@@ -117,18 +113,15 @@ class WaykeScraper(BaseScraper):
                             break
                         page += 1
                         continue
-                    self.logger.info(json.dumps({
-                        "event": "wayke_no_listings_in_next_data", "model": model,
-                    }))
 
-                # Fall back to HTML card parsing
                 soup = BeautifulSoup(html, "html.parser")
                 cards = (
                     soup.select("[class*='vehicle-card']")
                     or soup.select("[class*='car-card']")
                     or soup.select("article[class*='vehicle']")
                     or soup.select("[data-testid*='vehicle']")
-                    or soup.select("[data-testid*='car']")
+                    or soup.select("[class*='SearchItem']")
+                    or soup.select("[class*='search-item']")
                     or soup.select("li.hit")
                 )
                 if not cards:
@@ -152,14 +145,13 @@ class WaykeScraper(BaseScraper):
         parsed = []
         for item in raw_data:
             try:
-                # HTML card fallback
                 if item.get("_html"):
                     soup = BeautifulSoup(item["_html"], "html.parser")
                     base_url = item.get("_base_url", self.BASE_URL)
                     full_text = soup.get_text(" ", strip=True)
                     model = None
                     for m in ["V60", "V90", "XC60"]:
-                        if m.lower() in full_text.lower():
+                        if re.search(rf"\b{m}\b", full_text, re.IGNORECASE):
                             model = m
                             break
                     if not model:
@@ -168,7 +160,7 @@ class WaykeScraper(BaseScraper):
                     href = link_el["href"] if link_el else ""
                     if href and not href.startswith("http"):
                         href = base_url + href
-                    price_el = soup.select_one("[class*='price']")
+                    price_el = soup.select_one("[class*='price']") or soup.select_one("[class*='Price']")
                     price_sek = int(re.sub(r"[^\d]", "", price_el.get_text()) if price_el else "0") or 0
                     year = 0
                     m_yr = re.search(r"(20\d{2}|19\d{2})", full_text)
@@ -189,11 +181,9 @@ class WaykeScraper(BaseScraper):
                     })
                     continue
 
-                # Wayke vehicle fields (from __NEXT_DATA__)
                 make = str(item.get("make") or item.get("manufacturer") or "")
                 if "volvo" not in make.lower():
                     continue
-
                 model_raw = str(item.get("model") or item.get("modelName") or "")
                 model = None
                 for m in ["V60", "V90", "XC60"]:
@@ -202,43 +192,22 @@ class WaykeScraper(BaseScraper):
                         break
                 if not model:
                     continue
-
                 price_sek = int(item.get("price") or item.get("sellingPrice") or 0)
                 year = int(item.get("modelYear") or item.get("year") or 0)
-
-                mileage_raw = item.get("mileage") or item.get("odometer") or 0
-                mileage_mil = float(mileage_raw) / 10.0
-
+                mileage_mil = float(item.get("mileage") or item.get("odometer") or 0) / 10.0
                 fuel = _detect_fuel(str(item.get("fuelType") or item.get("fuel") or ""))
                 color = item.get("color") or item.get("exteriorColor")
                 gearbox = item.get("gearbox") or item.get("transmission")
                 vin = item.get("vin") or item.get("registrationNumber")
-
                 equipment = item.get("equipment") or item.get("features") or []
                 equip_text = " ".join(str(e) for e in equipment) if isinstance(equipment, list) else str(equipment)
-                description = str(item.get("description") or "")
-                features, audio_system = _extract_features(f"{equip_text} {description}")
-
-                url = (
-                    item.get("url")
-                    or item.get("shareUrl")
-                    or f"https://www.wayke.se/bil/{item.get('id', '')}"
-                )
-
+                features, audio_system = _extract_features(f"{equip_text} {item.get('description', '')}")
+                url = item.get("url") or item.get("shareUrl") or f"{self.BASE_URL}/bil/{item.get('id', '')}"
                 parsed.append({
-                    "source": self.NAME,
-                    "url": url,
-                    "model": model,
-                    "year": year,
-                    "price_sek": price_sek,
-                    "mileage_mil": mileage_mil,
-                    "fuel": fuel,
-                    "features": features,
-                    "audio_system": audio_system,
-                    "vin": vin,
-                    "title": f"Volvo {model} {year}",
-                    "color": color,
-                    "gearbox": gearbox,
+                    "source": self.NAME, "url": url, "model": model,
+                    "year": year, "price_sek": price_sek, "mileage_mil": mileage_mil,
+                    "fuel": fuel, "features": features, "audio_system": audio_system,
+                    "vin": vin, "title": f"Volvo {model} {year}", "color": color, "gearbox": gearbox,
                 })
             except Exception as e:
                 self.logger.warning(json.dumps({"event": "parse_error", "scraper": self.NAME, "error": str(e)}))
@@ -250,18 +219,11 @@ class WaykeScraper(BaseScraper):
             if not d.get("url") or not d.get("model"):
                 continue
             cars.append(Car(
-                source=d["source"],
-                url=d["url"],
-                model=d["model"],
-                year=d.get("year", 0),
-                price_sek=d.get("price_sek", 0),
-                mileage_mil=d.get("mileage_mil", 0.0),
-                fuel=d.get("fuel", "okänd"),
-                features=d.get("features", set()),
-                audio_system=d.get("audio_system"),
-                vin=d.get("vin"),
-                title=d.get("title"),
-                color=d.get("color"),
-                gearbox=d.get("gearbox"),
+                source=d["source"], url=d["url"], model=d["model"],
+                year=d.get("year", 0), price_sek=d.get("price_sek", 0),
+                mileage_mil=d.get("mileage_mil", 0.0), fuel=d.get("fuel", "okänd"),
+                features=d.get("features", set()), audio_system=d.get("audio_system"),
+                vin=d.get("vin"), title=d.get("title"),
+                color=d.get("color"), gearbox=d.get("gearbox"),
             ))
         return cars
