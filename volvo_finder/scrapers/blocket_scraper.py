@@ -105,7 +105,7 @@ class BlocketScraper(BaseScraper):
             for page in range(1, _MAX_PAGES + 1):
                 params = {**_SEARCH_PARAMS, "q": model, "page": str(page)}
                 url = f"{_BASE_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-                cache_key = f"blocket:{model}:page{page}"
+                cache_key = f"playwright:blocket:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 html = cached
                 if not html:

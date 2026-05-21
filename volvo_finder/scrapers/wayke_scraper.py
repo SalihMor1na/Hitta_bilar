@@ -92,7 +92,7 @@ class WaykeScraper(BaseScraper):
             page = 1
             while page <= 5:
                 url = _build_url(model, page)
-                cache_key = f"wayke:{model}:page{page}"
+                cache_key = f"playwright:wayke:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
                     html = cached
@@ -102,6 +102,7 @@ class WaykeScraper(BaseScraper):
                     html = await fetch_rendered_html(
                         url,
                         wait_selector="[class*='vehicle'], [class*='Vehicle'], article, [class*='card']",
+                        delay_ms=8000,
                     )
                     if html:
                         self.cache.set(cache_key, html)

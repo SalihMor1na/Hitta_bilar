@@ -22,23 +22,27 @@ class FilterService:
         """
         Diesel: max 16 000 mil.
         Recharge/PHEV/laddhybrid: max 11 000 mil.
-        All other fuels (bensin, el, hybrid, etc.): excluded.
+        Unknown fuel ("okänd"): allowed through — search cards often omit fuel.
+        All other known fuels (bensin, el, hybrid): excluded.
         """
         fuel = car.fuel.lower()
+        if fuel == "okänd":
+            return True  # Can't filter on unknown data
         if "diesel" in fuel:
-            return car.mileage_mil <= self.criteria.MAX_MILEAGE_DIESEL_MIL
+            mil = car.mileage_mil
+            return mil == 0 or mil <= self.criteria.MAX_MILEAGE_DIESEL_MIL
         elif "recharge" in fuel or "phev" in fuel or "laddhybrid" in fuel:
-            return car.mileage_mil <= self.criteria.MAX_MILEAGE_RECHARGE_MIL
+            mil = car.mileage_mil
+            return mil == 0 or mil <= self.criteria.MAX_MILEAGE_RECHARGE_MIL
         return False
 
     def has_required_features(self, car: Car) -> bool:
         """
-        Must have:
-        - panoramatak
-        - backkamera OR 360kamera (at least one)
-        - skinnstolar
-        - blis
+        Must have: panoramatak, backkamera/360kamera, skinnstolar, blis.
+        If features set is empty (search cards don't list equipment), allow through.
         """
+        if not car.features:
+            return True  # No feature data available — can't filter
         features = {f.lower() for f in car.features}
         has_pano = any("panorama" in f for f in features)
         has_camera = any("backkamera" in f or "360" in f for f in features)

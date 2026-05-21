@@ -118,7 +118,7 @@ class BytbilScraper(BaseScraper):
             while page <= 10:
                 params = {**_BASE_PARAMS, "FreeText": model, "Page": str(page)}
                 url = f"{_BASE_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-                cache_key = f"bytbil:{model}:page{page}"
+                cache_key = f"playwright:bytbil:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 html = cached
                 if not html:

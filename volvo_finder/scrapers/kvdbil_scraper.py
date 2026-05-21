@@ -113,7 +113,7 @@ class KvdbilScraper(BaseScraper):
             while page <= 10:
                 params = {**_BASE_PARAMS, "familyName": model, "page": str(page)}
                 url = f"{_BASE_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-                cache_key = f"kvd:{model}:page{page}"
+                cache_key = f"playwright:kvd:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 html = cached
                 if not html:
@@ -121,6 +121,7 @@ class KvdbilScraper(BaseScraper):
                     html = await fetch_rendered_html(
                         url,
                         wait_selector="[class*='object'], [class*='Object'], article, [class*='card'], [class*='vehicle']",
+                        delay_ms=8000,
                     )
                     if html:
                         self.cache.set(cache_key, html)

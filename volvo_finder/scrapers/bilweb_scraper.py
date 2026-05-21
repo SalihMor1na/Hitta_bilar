@@ -116,7 +116,7 @@ class BilwebScraper(BaseScraper):
         while offset <= 300:
             params = {**_BASE_PARAMS, "offset": str(offset)}
             url = f"{_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-            cache_key = f"bilweb:offset{offset}"
+            cache_key = f"playwright:bilweb:offset{offset}"
             cached = self.cache.get(cache_key)
             html = cached
             if not html:
@@ -124,6 +124,7 @@ class BilwebScraper(BaseScraper):
                 html = await fetch_rendered_html(
                     url,
                     wait_selector="[class*='car'], [class*='Car'], [class*='vehicle'], article, [class*='listing']",
+                    delay_ms=8000,
                 )
                 if html:
                     self.cache.set(cache_key, html)
