@@ -278,8 +278,14 @@ async def main() -> None:
             if c.url not in prev_urls and (not c.vin or c.vin not in prev_vins)
         ]
 
+        # Send all ranked cars to Slack (with direct links)
+        if ranked:
+            console.print(f"[bold]Sending {len(ranked)} car(s) to Slack...[/bold]")
+            await notify_svc.send_all_cars_to_slack(ranked)
+
+        # Telegram + email only for genuinely new cars
         if new_cars:
-            console.print(f"[bold green]Found {len(new_cars)} new car(s) — sending notifications...[/bold green]")
+            console.print(f"[bold green]Found {len(new_cars)} new car(s) — sending Telegram/email notifications...[/bold green]")
             await notify_svc.notify_new_cars(new_cars)
 
         logger.info(json.dumps({
