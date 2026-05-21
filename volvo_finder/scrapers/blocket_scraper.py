@@ -25,7 +25,10 @@ _BLOCKET_API_HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-site",
+    "Authorization": "Bearer anonymous",
 }
+
+_API_URL_V2 = "https://api.blocket.se/search_bff/v2/content"
 
 _FEATURE_MAP = {
     "panoramatak": "panoramatak",
@@ -128,6 +131,11 @@ class BlocketScraper(BaseScraper):
                     data = await self.http_client.get_json(
                         _API_URL, params=params, headers=_BLOCKET_API_HEADERS
                     )
+                    # Try v2 endpoint if v1 fails
+                    if data is None:
+                        data = await self.http_client.get_json(
+                            _API_URL_V2, params=params, headers=_BLOCKET_API_HEADERS
+                        )
                     if data is not None:
                         self.cache.set(cache_key, json.dumps(data))
                     else:
@@ -135,7 +143,7 @@ class BlocketScraper(BaseScraper):
                             "event": "blocket_api_empty",
                             "query": query,
                             "page": page,
-                            "hint": "API returned None — may need session token",
+                            "hint": "Both v1 and v2 API returned None",
                         }))
 
                 if not data:

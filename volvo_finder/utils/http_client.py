@@ -20,7 +20,9 @@ _BROWSER_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Do NOT set Accept-Encoding manually — let aiohttp manage it.
+    # When the 'Brotli' package is installed aiohttp adds 'br' automatically
+    # and can decompress it; without the package it omits 'br' to avoid errors.
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
@@ -198,6 +200,12 @@ class HttpClient:
                         }))
                         return None
                     else:
+                        logger.warning(json.dumps({
+                            "event": "http_unexpected_status",
+                            "url": url,
+                            "status": response.status,
+                            "attempt": attempt + 1,
+                        }))
                         if attempt < self.MAX_RETRIES - 1:
                             await asyncio.sleep(self.BASE_BACKOFF_SECONDS * (2 ** attempt))
 
