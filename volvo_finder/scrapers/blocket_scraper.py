@@ -1,18 +1,20 @@
-"""Blocket.se scraper using public HTML pages with __NEXT_DATA__ extraction."""
+"""Blocket.se scraper using Playwright for JS-rendered search results."""
 import json
 import re
+import urllib.parse
 from typing import Optional
+
+from bs4 import BeautifulSoup
 
 from models.car import Car
 from scrapers.base_scraper import BaseScraper
+from utils.browser_client import fetch_rendered_html
 from utils.cache import Cache
 from utils.http_client import HttpClient
-from utils.nextjs import extract_next_data, find_listings_in_next_data
 
 # Blocket public search — /mobility/search/car is the correct endpoint (verified in browser)
 _SEARCH_MODELS = ["v60", "v90", "xc60"]
 _BASE_SEARCH_URL = "https://www.blocket.se/mobility/search/car"
-_WARMUP_URL = "https://www.blocket.se/"
 _MAX_PAGES = 5
 
 # Query params matching what the browser sends (filter applied server-side)
@@ -74,54 +76,18 @@ def _detect_fuel(text: str) -> str:
     return "okänd"
 
 
-def _extract_features(parameters: list[dict]) -> tuple[set[str], Optional[str]]:
-    """Extract features set and audio_system from Blocket parameters list."""
+def _extract_features_from_text(text: str) -> tuple[set[str], Optional[str]]:
     features: set[str] = set()
     audio_system: Optional[str] = None
-    for param in parameters:
-        label = str(param.get("label", "")).lower()
-        value = str(param.get("value", "")).lower()
-        combined = f"{label} {value}"
-        for kw, feat in _FEATURE_MAP.items():
-            if kw.lower() in combined:
-                features.add(feat)
-        if "bowers" in combined or "b&w" in combined:
-            audio_system = "Bowers & Wilkins"
-        elif "harman" in combined:
-            audio_system = "Harman Kardon"
+    text_l = text.lower()
+    for kw, feat in _FEATURE_MAP.items():
+        if kw.lower() in text_l:
+            features.add(feat)
+    if "bowers" in text_l or "b&w" in text_l:
+        audio_system = "Bowers & Wilkins"
+    elif "harman" in text_l:
+        audio_system = "Harman Kardon"
     return features, audio_system
-
-
-def _find_listings(data: dict) -> list[dict]:
-    """Try multiple known paths in __NEXT_DATA__ to locate car listings."""
-    # Path 1: dehydratedState queries
-    try:
-        listings = (
-            data["props"]["pageProps"]["dehydratedState"]["queries"][0]["state"]["data"]["data"]
-        )
-        if isinstance(listings, list) and listings:
-            return listings
-    except (KeyError, IndexError, TypeError):
-        pass
-
-    # Path 2: direct pageProps listings
-    try:
-        listings = data["props"]["pageProps"]["listings"]
-        if isinstance(listings, list) and listings:
-            return listings
-    except (KeyError, TypeError):
-        pass
-
-    # Path 3: pageProps data.data
-    try:
-        listings = data["props"]["pageProps"]["data"]["data"]
-        if isinstance(listings, list) and listings:
-            return listings
-    except (KeyError, TypeError):
-        pass
-
-    # Path 4: recursive search for car-like dicts
-    return find_listings_in_next_data(data)
 
 
 class BlocketScraper(BaseScraper):
@@ -132,183 +98,121 @@ class BlocketScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch all Volvo listings from Blocket.
-
-        Tries the /mobility/search/car endpoint as JSON first (it may return
-        structured data when Accept: application/json is sent), then falls back
-        to HTML + __NEXT_DATA__ extraction.
-        """
-        await self.http_client.warm_up(_WARMUP_URL)
-
+        """Fetch Blocket listings using headless browser (page is JS-rendered)."""
         all_items: list[dict] = []
+
         for model in _SEARCH_MODELS:
             for page in range(1, _MAX_PAGES + 1):
                 params = {**_SEARCH_PARAMS, "q": model, "page": str(page)}
+                url = f"{_BASE_SEARCH_URL}?{urllib.parse.urlencode(params)}"
                 cache_key = f"blocket:{model}:page{page}"
                 cached = self.cache.get(cache_key)
-
-                html = None
-                if cached is not None:
-                    html = cached
-                else:
-                    # Try JSON first — Blocket's search endpoint may support it
-                    json_data = await self.http_client.get_json(
-                        _BASE_SEARCH_URL,
-                        params=params,
-                        headers={"Accept": "application/json, text/html;q=0.9, */*;q=0.8"},
+                html = cached
+                if not html:
+                    self.logger.info(json.dumps({"event": "blocket_browser_fetch", "model": model, "page": page}))
+                    html = await fetch_rendered_html(
+                        url,
+                        wait_selector="[class*='item'], [class*='Item'], article, [class*='ad'], [class*='Ad']",
                     )
-                    if json_data and isinstance(json_data, (dict, list)):
-                        # Got JSON — wrap as a pseudo-item for parse()
-                        items = (
-                            json_data.get("data") or json_data.get("listings") or
-                            json_data.get("ads") or json_data.get("items") or
-                            (json_data if isinstance(json_data, list) else [])
-                        )
-                        if items:
-                            self.logger.info(json.dumps({
-                                "event": "blocket_json_success", "model": model,
-                                "page": page, "count": len(items),
-                            }))
-                            all_items.extend(items)
-                            if len(items) < 20:
-                                break
-                            continue
-
-                    # Fall back to HTML
-                    html = await self.http_client.get_text(_BASE_SEARCH_URL, params=params)
                     if html:
                         self.cache.set(cache_key, html)
 
                 if not html:
                     self.logger.warning(json.dumps({
-                        "event": "blocket_fetch_empty",
-                        "model": model,
-                        "page": page,
+                        "event": "blocket_fetch_empty", "model": model, "page": page,
                     }))
                     break
 
-                try:
-                    next_data = extract_next_data(html)
-                except Exception as e:
-                    self.logger.warning(json.dumps({
-                        "event": "blocket_next_data_error",
-                        "model": model,
-                        "page": page,
-                        "error": str(e),
-                    }))
-                    next_data = None
+                soup = BeautifulSoup(html, "html.parser")
+                cards = (
+                    soup.select("[class*='item-list__item']")
+                    or soup.select("[class*='ItemCard']")
+                    or soup.select("[class*='AdCard']")
+                    or soup.select("[data-testid='ad-card']")
+                    or soup.select("article[class*='ad']")
+                    or soup.select("li[class*='item']")
+                    or soup.select("article")
+                )
 
-                if not next_data:
+                if not cards:
                     self.logger.info(json.dumps({
-                        "event": "blocket_no_next_data",
-                        "model": model,
-                        "page": page,
-                        "hint": "__NEXT_DATA__ not found — page may be JS-rendered",
+                        "event": "blocket_no_cards", "model": model, "page": page,
+                        "html_snippet": soup.body.get_text(" ", strip=True)[:400] if soup.body else "",
                     }))
                     break
 
-                listings = _find_listings(next_data)
-                if not listings:
-                    self.logger.info(json.dumps({
-                        "event": "blocket_no_listings",
-                        "model": model,
-                        "page": page,
-                    }))
-                    break
+                self.logger.info(json.dumps({
+                    "event": "blocket_cards_found", "model": model, "page": page, "count": len(cards),
+                }))
+                for card in cards:
+                    all_items.append({"_html": str(card), "_base_url": self.BASE_URL})
 
-                all_items.extend(listings)
-
-                if len(listings) < 20:
+                next_btn = (
+                    soup.select_one("a[rel='next']")
+                    or soup.select_one("[aria-label*='nästa']")
+                    or soup.select_one("[aria-label*='Next']")
+                )
+                if not next_btn:
                     break
 
         return all_items
 
     def parse(self, raw_data: list[dict]) -> list[dict]:
-        """Extract relevant fields from Blocket __NEXT_DATA__ listing items."""
+        """Extract relevant fields from Blocket rendered HTML card items."""
         parsed = []
         for item in raw_data:
             try:
-                subject = item.get("subject", "") or item.get("title", "") or ""
-                if "volvo" not in subject.lower():
+                soup = BeautifulSoup(item["_html"], "html.parser")
+                base_url = item.get("_base_url", self.BASE_URL)
+                full_text = soup.get_text(" ", strip=True)
+
+                if "volvo" not in full_text.lower():
                     continue
 
-                model = _detect_model(subject)
-                if model is None:
-                    for p in item.get("parameters", []):
-                        if p.get("label", "").lower() in ("modell", "model"):
-                            model = _detect_model(str(p.get("value", "")))
-                if model is None:
+                model = _detect_model(full_text)
+                if not model:
                     continue
 
-                price_data = item.get("price", {}) or {}
-                if isinstance(price_data, dict):
-                    price = int(price_data.get("value", 0) or price_data.get("amount", 0) or 0)
-                else:
-                    try:
-                        price = int(price_data)
-                    except (ValueError, TypeError):
-                        price = 0
+                link_el = soup.select_one("a[href]")
+                href = link_el["href"] if link_el else ""
+                if href and not href.startswith("http"):
+                    href = base_url + href
 
-                parameters = item.get("parameters", []) or []
+                price_el = (
+                    soup.select_one("[class*='price']")
+                    or soup.select_one("[class*='Price']")
+                )
+                price_text = price_el.get_text(strip=True) if price_el else "0"
+                price_sek = int(re.sub(r"[^\d]", "", price_text) or "0")
 
                 year = 0
+                m_yr = re.search(r"(20\d{2}|19\d{2})", full_text)
+                if m_yr:
+                    year = int(m_yr.group(1))
+
                 mileage_mil = 0.0
-                fuel = "okänd"
-                color = None
-                gearbox = None
+                m_mil = re.search(r"(\d[\d\s]*)\s*mil", full_text, re.IGNORECASE)
+                if m_mil:
+                    raw_mil = re.sub(r"[^\d,.]", "", m_mil.group(0)).replace(",", ".")
+                    try:
+                        mileage_mil = float(raw_mil) if raw_mil else 0.0
+                    except ValueError:
+                        pass
 
-                for p in parameters:
-                    label = (p.get("label") or "").lower()
-                    value = str(p.get("value") or "")
-                    if label in ("modelår", "year", "år"):
-                        try:
-                            year = int(value)
-                        except ValueError:
-                            pass
-                    elif label in ("miltal", "mileage", "mil"):
-                        try:
-                            num = re.sub(r"[^\d,.]", "", value).replace(",", ".")
-                            mileage_mil = float(num) if num else 0.0
-                        except ValueError:
-                            pass
-                    elif label in ("drivmedel", "fuel", "bränsle"):
-                        fuel = _detect_fuel(value)
-                    elif label in ("färg", "color"):
-                        color = value
-                    elif label in ("växellåda", "gearbox", "transmission"):
-                        gearbox = value
-
-                features, audio_system = _extract_features(parameters)
-                body = item.get("body", "") or item.get("description", "") or ""
-                for kw, feat in _FEATURE_MAP.items():
-                    if kw.lower() in body.lower():
-                        features.add(feat)
-                if "bowers" in body.lower():
-                    audio_system = audio_system or "Bowers & Wilkins"
-                elif "harman" in body.lower():
-                    audio_system = audio_system or "Harman Kardon"
-
-                ad_id = item.get("ad_id") or item.get("list_id") or item.get("id") or ""
-                url = (
-                    item.get("share_url")
-                    or item.get("url")
-                    or f"https://www.blocket.se/annons/{ad_id}"
-                )
+                fuel = _detect_fuel(full_text)
+                features, audio_system = _extract_features_from_text(full_text)
 
                 parsed.append({
                     "source": self.NAME,
-                    "url": url,
+                    "url": href,
                     "model": model,
                     "year": year,
-                    "price_sek": price,
+                    "price_sek": price_sek,
                     "mileage_mil": mileage_mil,
                     "fuel": fuel,
                     "features": features,
                     "audio_system": audio_system,
-                    "vin": item.get("vin"),
-                    "title": subject,
-                    "color": color,
-                    "gearbox": gearbox,
+                    "title": full_text[:80],
                 })
             except Exception as e:
                 self.logger.warning(json.dumps({"event": "parse_error", "scraper": self.NAME, "error": str(e)}))
@@ -317,21 +221,18 @@ class BlocketScraper(BaseScraper):
     def normalize(self, parsed: list[dict]) -> list[Car]:
         cars = []
         for d in parsed:
-            if not d.get("url") or not d.get("model") or not d.get("year"):
+            if not d.get("url") or not d.get("model"):
                 continue
             cars.append(Car(
                 source=d["source"],
                 url=d["url"],
                 model=d["model"],
-                year=d["year"],
-                price_sek=d["price_sek"],
-                mileage_mil=d["mileage_mil"],
-                fuel=d["fuel"],
+                year=d.get("year", 0),
+                price_sek=d.get("price_sek", 0),
+                mileage_mil=d.get("mileage_mil", 0.0),
+                fuel=d.get("fuel", "okänd"),
                 features=d.get("features", set()),
                 audio_system=d.get("audio_system"),
-                vin=d.get("vin"),
                 title=d.get("title"),
-                color=d.get("color"),
-                gearbox=d.get("gearbox"),
             ))
         return cars

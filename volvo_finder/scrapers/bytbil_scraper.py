@@ -1,17 +1,16 @@
-"""Bytbil.com scraper using __NEXT_DATA__ extraction with HTML card fallback."""
+"""Bytbil.com scraper using Playwright for JS-rendered search results."""
 import json
 import re
+import urllib.parse
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from models.car import Car
 from scrapers.base_scraper import BaseScraper
+from utils.browser_client import fetch_rendered_html
 from utils.cache import Cache
 from utils.http_client import HttpClient
-from utils.nextjs import extract_next_data, find_listings_in_next_data
-
-_WARMUP_URL = "https://www.bytbil.com/"
 
 # Correct search URL — verified directly in Chrome by user
 _BASE_SEARCH_URL = "https://www.bytbil.com/bil"
@@ -111,21 +110,23 @@ class BytbilScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch car listings from Bytbil using the correct search URL."""
-        await self.http_client.warm_up(_WARMUP_URL)
-
+        """Fetch Bytbil listings using headless browser (page is JS-rendered)."""
         all_items: list[dict] = []
 
         for model in _SEARCH_MODELS:
             page = 1
-            while True:
+            while page <= 10:
                 params = {**_BASE_PARAMS, "FreeText": model, "Page": str(page)}
+                url = f"{_BASE_SEARCH_URL}?{urllib.parse.urlencode(params)}"
                 cache_key = f"bytbil:{model}:page{page}"
                 cached = self.cache.get(cache_key)
-                if cached is not None:
-                    html = cached
-                else:
-                    html = await self.http_client.get_text(_BASE_SEARCH_URL, params=params)
+                html = cached
+                if not html:
+                    self.logger.info(json.dumps({"event": "bytbil_browser_fetch", "model": model, "page": page}))
+                    html = await fetch_rendered_html(
+                        url,
+                        wait_selector="article, [class*='car-list'], [class*='vehicle'], [class*='CarCard']",
+                    )
                     if html:
                         self.cache.set(cache_key, html)
 
@@ -136,23 +137,6 @@ class BytbilScraper(BaseScraper):
                     }))
                     break
 
-                # Try __NEXT_DATA__ first (Bytbil is a Next.js app)
-                next_data = None
-                try:
-                    next_data = extract_next_data(html)
-                except Exception:
-                    pass
-
-                if next_data:
-                    listings = find_listings_in_next_data(next_data)
-                    if listings:
-                        all_items.extend(listings)
-                        if len(listings) < 20:
-                            break
-                        page += 1
-                        continue
-
-                # Fall back to HTML card parsing
                 soup = BeautifulSoup(html, "html.parser")
                 cards = (
                     soup.select("article.car-list-card")
@@ -162,13 +146,15 @@ class BytbilScraper(BaseScraper):
                     or soup.select("li.hit")
                     or soup.select("div[class*='vehicle-card']")
                     or soup.select("div[class*='result-item']")
+                    or soup.select("article[class*='CarCard']")
+                    or soup.select("article")
                 )
 
                 if not cards:
                     self.logger.info(json.dumps({
                         "event": "no_cards_found", "scraper": self.NAME,
                         "model": model, "page": page,
-                        "html_snippet": soup.body.get_text(" ", strip=True)[:300] if soup.body else "",
+                        "html_snippet": soup.body.get_text(" ", strip=True)[:400] if soup.body else "",
                     }))
                     break
 
@@ -180,7 +166,7 @@ class BytbilScraper(BaseScraper):
                     or soup.select_one(".pagination__next")
                     or soup.select_one("[aria-label='Nästa sida']")
                 )
-                if not next_btn or page >= 20:
+                if not next_btn or page >= 10:
                     break
                 page += 1
 
