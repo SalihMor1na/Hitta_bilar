@@ -224,6 +224,13 @@ class HttpClient:
 
         return None
 
+    async def warm_up(self, url: str) -> None:
+        """Fetch a URL to establish session cookies. Ignores response."""
+        try:
+            await self.get_text(url)
+        except Exception:
+            pass
+
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()

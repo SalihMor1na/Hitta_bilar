@@ -1,4 +1,4 @@
-"""Blocket.se scraper using Blocket's public search API."""
+"""Blocket.se scraper using public HTML pages with __NEXT_DATA__ extraction."""
 import json
 import re
 from typing import Optional
@@ -7,28 +7,13 @@ from models.car import Car
 from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
+from utils.nextjs import extract_next_data, find_listings_in_next_data
 
-# Blocket car category API
-_API_URL = "https://api.blocket.se/search_bff/v1/content"
-_DEFAULT_PARAMS = {
-    "cg": "1020",   # Cars category
-    "st": "s",       # Sell
-    "lim": "60",
-    "include": "extend_with_shipping",
-}
-_SEARCH_QUERIES = ["volvo v60", "volvo v90", "volvo xc60"]
-
-# Blocket API requires these headers to return results
-_BLOCKET_API_HEADERS = {
-    "Origin": "https://www.blocket.se",
-    "Referer": "https://www.blocket.se/bilar/personbilar",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "Authorization": "Bearer anonymous",
-}
-
-_API_URL_V2 = "https://api.blocket.se/search_bff/v2/content"
+# Blocket public search URLs — no auth required, same as any browser sees
+_SEARCH_MODELS = ["v60", "v90", "xc60"]
+_BASE_SEARCH_URL = "https://www.blocket.se/bilar/personbilar/volvo"
+_WARMUP_URL = "https://www.blocket.se/"
+_MAX_PAGES = 5
 
 _FEATURE_MAP = {
     "panoramatak": "panoramatak",
@@ -48,11 +33,6 @@ _FEATURE_MAP = {
     "b&w": "bowers_wilkins",
     "harman kardon": "harman_kardon",
     "harman/kardon": "harman_kardon",
-}
-
-_AUDIO_KEYWORDS = {
-    "bowers_wilkins": ["bowers", "b&w"],
-    "harman_kardon": ["harman kardon", "harman/kardon"],
 }
 
 _MODEL_PATTERNS = {
@@ -106,6 +86,41 @@ def _extract_features(parameters: list[dict]) -> tuple[set[str], Optional[str]]:
     return features, audio_system
 
 
+def _find_listings(data: dict) -> list[dict]:
+    """
+    Try multiple known paths in __NEXT_DATA__ to locate car listings.
+    Falls back to recursive search via find_listings_in_next_data.
+    """
+    # Path 1: dehydratedState queries
+    try:
+        listings = (
+            data["props"]["pageProps"]["dehydratedState"]["queries"][0]["state"]["data"]["data"]
+        )
+        if isinstance(listings, list) and listings:
+            return listings
+    except (KeyError, IndexError, TypeError):
+        pass
+
+    # Path 2: direct pageProps listings
+    try:
+        listings = data["props"]["pageProps"]["listings"]
+        if isinstance(listings, list) and listings:
+            return listings
+    except (KeyError, TypeError):
+        pass
+
+    # Path 3: pageProps data.data
+    try:
+        listings = data["props"]["pageProps"]["data"]["data"]
+        if isinstance(listings, list) and listings:
+            return listings
+    except (KeyError, TypeError):
+        pass
+
+    # Path 4: recursive search for car-like dicts
+    return find_listings_in_next_data(data)
+
+
 class BlocketScraper(BaseScraper):
     NAME = "blocket"
     BASE_URL = "https://www.blocket.se"
@@ -114,61 +129,79 @@ class BlocketScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch all Volvo listings from Blocket, paginating through results."""
+        """Fetch all Volvo listings from Blocket using public HTML + __NEXT_DATA__."""
+        # Warm up to establish session cookies
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
-        for query in _SEARCH_QUERIES:
-            page = 0
-            while True:
-                params = {**_DEFAULT_PARAMS, "q": query, "page": str(page)}
-                cache_key = f"{_API_URL}?q={query}&page={page}"
+        for model in _SEARCH_MODELS:
+            for page in range(1, _MAX_PAGES + 1):
+                params = {"q": model, "st": "s", "cg": "1020", "page": str(page)}
+                cache_key = f"{_BASE_SEARCH_URL}?q={model}&page={page}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
-                    try:
-                        data = json.loads(cached)
-                    except json.JSONDecodeError:
-                        data = None
+                    html = cached
                 else:
-                    data = await self.http_client.get_json(
-                        _API_URL, params=params, headers=_BLOCKET_API_HEADERS
+                    html = await self.http_client.get_text(
+                        _BASE_SEARCH_URL, params=params
                     )
-                    # Try v2 endpoint if v1 fails
-                    if data is None:
-                        data = await self.http_client.get_json(
-                            _API_URL_V2, params=params, headers=_BLOCKET_API_HEADERS
-                        )
-                    if data is not None:
-                        self.cache.set(cache_key, json.dumps(data))
-                    else:
-                        self.logger.warning(json.dumps({
-                            "event": "blocket_api_empty",
-                            "query": query,
-                            "page": page,
-                            "hint": "Both v1 and v2 API returned None",
-                        }))
+                    if html:
+                        self.cache.set(cache_key, html)
 
-                if not data:
+                if not html:
+                    self.logger.warning(json.dumps({
+                        "event": "blocket_fetch_empty",
+                        "model": model,
+                        "page": page,
+                        "hint": "No HTML returned — site may need JS or is blocking",
+                    }))
                     break
 
-                items = data.get("data", [])
-                if not items:
-                    break
-                all_items.extend(items)
+                # Extract __NEXT_DATA__
+                try:
+                    next_data = extract_next_data(html)
+                except Exception as e:
+                    self.logger.warning(json.dumps({
+                        "event": "blocket_next_data_error",
+                        "model": model,
+                        "page": page,
+                        "error": str(e),
+                    }))
+                    next_data = None
 
-                # Check if there are more pages
-                total_count = data.get("total_count", 0)
-                fetched_so_far = (page + 1) * int(_DEFAULT_PARAMS["lim"])
-                if fetched_so_far >= total_count or len(items) < int(_DEFAULT_PARAMS["lim"]):
+                if not next_data:
+                    self.logger.info(json.dumps({
+                        "event": "blocket_no_next_data",
+                        "model": model,
+                        "page": page,
+                        "hint": "__NEXT_DATA__ not found — page may be JS-rendered",
+                    }))
                     break
-                page += 1
+
+                listings = _find_listings(next_data)
+                if not listings:
+                    self.logger.info(json.dumps({
+                        "event": "blocket_no_listings",
+                        "model": model,
+                        "page": page,
+                        "hint": "No car listings found in __NEXT_DATA__",
+                    }))
+                    break
+
+                all_items.extend(listings)
+
+                # If we got fewer listings than expected, assume last page
+                if len(listings) < 20:
+                    break
 
         return all_items
 
     def parse(self, raw_data: list[dict]) -> list[dict]:
-        """Extract relevant fields from Blocket API items."""
+        """Extract relevant fields from Blocket __NEXT_DATA__ listing items."""
         parsed = []
         for item in raw_data:
             try:
-                subject = item.get("subject", "")
+                subject = item.get("subject", "") or item.get("title", "") or ""
                 # Filter to only Volvo listings
                 if "volvo" not in subject.lower():
                     continue
@@ -177,15 +210,19 @@ class BlocketScraper(BaseScraper):
                 if model is None:
                     # Try parameters
                     for p in item.get("parameters", []):
-                        if p.get("label", "").lower() in ("märke", "make"):
-                            pass
                         if p.get("label", "").lower() in ("modell", "model"):
                             model = _detect_model(str(p.get("value", "")))
                 if model is None:
                     continue
 
                 price_data = item.get("price", {}) or {}
-                price = int(price_data.get("amount", 0) or 0)
+                if isinstance(price_data, dict):
+                    price = int(price_data.get("value", 0) or price_data.get("amount", 0) or 0)
+                else:
+                    try:
+                        price = int(price_data)
+                    except (ValueError, TypeError):
+                        price = 0
 
                 parameters = item.get("parameters", []) or []
 
@@ -205,7 +242,6 @@ class BlocketScraper(BaseScraper):
                             pass
                     elif label in ("miltal", "mileage", "mil"):
                         try:
-                            # Remove non-numeric chars
                             num = re.sub(r"[^\d,.]", "", value).replace(",", ".")
                             mileage_mil = float(num) if num else 0.0
                         except ValueError:
@@ -218,8 +254,8 @@ class BlocketScraper(BaseScraper):
                         gearbox = value
 
                 features, audio_system = _extract_features(parameters)
-                # Also scan description
-                body = item.get("body", "") or ""
+                # Also scan description/body
+                body = item.get("body", "") or item.get("description", "") or ""
                 for kw, feat in _FEATURE_MAP.items():
                     if kw.lower() in body.lower():
                         features.add(feat)
@@ -228,8 +264,12 @@ class BlocketScraper(BaseScraper):
                 elif "harman" in body.lower():
                     audio_system = audio_system or "Harman Kardon"
 
-                ad_id = item.get("ad_id") or item.get("list_id") or ""
-                url = item.get("share_url") or f"https://www.blocket.se/annons/{ad_id}"
+                ad_id = item.get("ad_id") or item.get("list_id") or item.get("id") or ""
+                url = (
+                    item.get("share_url")
+                    or item.get("url")
+                    or f"https://www.blocket.se/annons/{ad_id}"
+                )
 
                 parsed.append({
                     "source": self.NAME,

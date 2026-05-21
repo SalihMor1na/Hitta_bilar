@@ -10,6 +10,19 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
+_WARMUP_URL = "https://www.bytbil.com/"
+
+# Try these URL patterns in order — use whichever returns listings
+_SEARCH_URLS_TO_TRY = [
+    "https://www.bytbil.com/bilar/volvo/v60",
+    "https://www.bytbil.com/bilar/volvo/v90",
+    "https://www.bytbil.com/bilar/volvo/xc60",
+    "https://www.bytbil.com/sok?make=Volvo&model=V60",
+    "https://www.bytbil.com/sok?make=Volvo&model=V90",
+    "https://www.bytbil.com/sok?make=Volvo&model=XC60",
+]
+
+# Legacy fallback
 _SEARCH_URL = "https://www.bytbil.com/begagnade-bilar/volvo"
 _DEFAULT_PARAMS = {
     "models": "V60,XC60,V90",
@@ -100,52 +113,100 @@ class BytbilScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch car listings from Bytbil, paginating through results."""
+        """Fetch car listings from Bytbil, trying multiple URL patterns."""
+        # Warm up to establish session cookies
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
-        page = 1
-        while True:
-            params = {**_DEFAULT_PARAMS, "page": str(page)}
-            url = _SEARCH_URL
-            cache_key = f"{url}?page={page}"
-            cached = self.cache.get(cache_key)
-            if cached is not None:
-                html = cached
-            else:
-                html = await self.http_client.get_text(url, params=params)
-                if html:
-                    self.cache.set(cache_key, html)
 
-            if not html:
-                self.logger.warning(json.dumps({"event": "fetch_empty", "scraper": self.NAME, "page": page}))
-                break
+        # Try each URL pattern and collect results from whichever works
+        for search_url in _SEARCH_URLS_TO_TRY:
+            page = 1
+            found_any = False
+            while True:
+                url = search_url if page == 1 else f"{search_url}{'&' if '?' in search_url else '?'}page={page}"
+                cache_key = f"bytbil:{url}"
+                cached = self.cache.get(cache_key)
+                if cached is not None:
+                    html = cached
+                else:
+                    html = await self.http_client.get_text(url)
+                    if html:
+                        self.cache.set(cache_key, html)
 
-            soup = BeautifulSoup(html, "html.parser")
+                if not html:
+                    self.logger.warning(json.dumps({"event": "fetch_empty", "scraper": self.NAME, "url": url}))
+                    break
 
-            # Find car listing cards — Bytbil uses article or div.car-list-card
-            cards = (
-                soup.select("article.car-list-card")
-                or soup.select("div.car-list-card")
-                or soup.select("[data-testid='car-card']")
-                or soup.select("article[class*='car']")
-                or soup.select("li.hit")
-            )
+                soup = BeautifulSoup(html, "html.parser")
 
-            if not cards:
-                self.logger.warning(json.dumps({
-                    "event": "no_cards_found",
-                    "scraper": self.NAME,
-                    "page": page,
-                }))
-                break
+                # Find car listing cards — Bytbil uses article or div.car-list-card
+                cards = (
+                    soup.select("article.car-list-card")
+                    or soup.select("div.car-list-card")
+                    or soup.select("[data-testid='car-card']")
+                    or soup.select("article[class*='car']")
+                    or soup.select("li.hit")
+                )
 
-            for card in cards:
-                all_items.append({"html": str(card), "base_url": self.BASE_URL})
+                if not cards:
+                    self.logger.warning(json.dumps({
+                        "event": "no_cards_found",
+                        "scraper": self.NAME,
+                        "url": url,
+                    }))
+                    break
 
-            # Check for next page
-            next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
-            if not next_btn or page >= 20:
-                break
-            page += 1
+                found_any = True
+                for card in cards:
+                    all_items.append({"html": str(card), "base_url": self.BASE_URL})
+
+                # Check for next page
+                next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
+                if not next_btn or page >= 20:
+                    break
+                page += 1
+
+            # If this URL pattern worked, skip remaining patterns for this model
+            if found_any:
+                continue
+
+        # Fallback: legacy URL with params if nothing worked
+        if not all_items:
+            page = 1
+            while True:
+                params = {**_DEFAULT_PARAMS, "page": str(page)}
+                cache_key = f"{_SEARCH_URL}?page={page}"
+                cached = self.cache.get(cache_key)
+                if cached is not None:
+                    html = cached
+                else:
+                    html = await self.http_client.get_text(_SEARCH_URL, params=params)
+                    if html:
+                        self.cache.set(cache_key, html)
+
+                if not html:
+                    break
+
+                soup = BeautifulSoup(html, "html.parser")
+                cards = (
+                    soup.select("article.car-list-card")
+                    or soup.select("div.car-list-card")
+                    or soup.select("[data-testid='car-card']")
+                    or soup.select("article[class*='car']")
+                    or soup.select("li.hit")
+                )
+
+                if not cards:
+                    break
+
+                for card in cards:
+                    all_items.append({"html": str(card), "base_url": self.BASE_URL})
+
+                next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
+                if not next_btn or page >= 20:
+                    break
+                page += 1
 
         return all_items
 
