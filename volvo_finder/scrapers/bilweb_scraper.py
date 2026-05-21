@@ -15,6 +15,7 @@ _SEARCH_URLS = [
     "https://www.bilweb.se/begagnade-bilar/volvo/v90",
     "https://www.bilweb.se/begagnade-bilar/volvo/xc60",
 ]
+_WARMUP_URL = "https://www.bilweb.se/"
 
 _MODEL_PATTERNS = {
     "V60": re.compile(r"\bV60\b", re.IGNORECASE),
@@ -98,6 +99,9 @@ class BilwebScraper(BaseScraper):
 
     async def fetch(self) -> list[dict]:
         """Fetch car listings from Bilweb for each model."""
+        # Warm up to establish session cookies
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
         for search_url in _SEARCH_URLS:
             page = 1
