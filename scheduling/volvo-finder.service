@@ -1,0 +1,19 @@
+[Unit]
+Description=Volvo Finder Car Scraper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=/home/user/Hitta_bilar
+ExecStart=/usr/bin/python3 /home/user/Hitta_bilar/volvo_finder/main.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=volvo-finder
+
+# Uncomment if using a virtual environment:
+# ExecStart=/home/user/Hitta_bilar/.venv/bin/python /home/user/Hitta_bilar/volvo_finder/main.py
+
+[Install]
+WantedBy=multi-user.target
