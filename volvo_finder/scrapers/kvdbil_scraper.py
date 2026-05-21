@@ -11,9 +11,9 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 
 _SEARCH_URLS = [
-    "https://www.kvdbil.se/sv-SE/sok?q=volvo+v60&fuelType=DIESEL,PHEV",
-    "https://www.kvdbil.se/sv-SE/sok?q=volvo+v90&fuelType=DIESEL,PHEV",
-    "https://www.kvdbil.se/sv-SE/sok?q=volvo+xc60&fuelType=DIESEL,PHEV",
+    "https://www.kvdbil.se/sv-SE/auktion/personbil?q=volvo+v60",
+    "https://www.kvdbil.se/sv-SE/auktion/personbil?q=volvo+v90",
+    "https://www.kvdbil.se/sv-SE/auktion/personbil?q=volvo+xc60",
 ]
 
 _MODEL_PATTERNS = {

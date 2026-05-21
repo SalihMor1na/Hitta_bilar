@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-import time
+import ssl
 from collections import defaultdict
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -11,13 +11,37 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+# Browser-realistic headers — reduces bot-detection on modern sites
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+_NO_VERIFY_SSL = ssl.create_default_context()
+_NO_VERIFY_SSL.check_hostname = False
+_NO_VERIFY_SSL.verify_mode = ssl.CERT_NONE
+
 
 class HttpClient:
     """
     Async HTTP client with:
     - Per-domain rate limiting
     - Exponential backoff retries (3 attempts)
-    - Configurable User-Agent
+    - Browser-realistic User-Agent and headers
+    - Optional per-request SSL verification bypass
     - Structured JSON logging
     """
 
@@ -28,11 +52,6 @@ class HttpClient:
         self.settings = settings
         self._session: Optional[aiohttp.ClientSession] = None
         self._domain_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._headers = {
-            "User-Agent": settings.USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "sv-SE,sv;q=0.9,en;q=0.8",
-        }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -41,40 +60,45 @@ class HttpClient:
             self._session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=timeout,
-                headers=self._headers,
+                headers=_BROWSER_HEADERS,
             )
         return self._session
 
     def _get_domain(self, url: str) -> str:
-        parsed = urlparse(url)
-        return parsed.netloc
+        return urlparse(url).netloc
 
     async def _rate_limit(self, domain: str) -> None:
-        """Enforce per-domain rate limiting."""
         lock = self._domain_locks[domain]
         async with lock:
             await asyncio.sleep(self.settings.REQUEST_DELAY_SECONDS)
 
-    async def get_text(self, url: str, params: Optional[dict] = None) -> Optional[str]:
+    async def get_text(
+        self,
+        url: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        verify_ssl: bool = True,
+    ) -> Optional[str]:
         """
         Fetch URL and return response text.
-        Retries up to MAX_RETRIES times with exponential backoff.
-        Returns None on failure.
+        Pass verify_ssl=False for sites with self-signed certificates.
         """
         domain = self._get_domain(url)
         session = await self._get_session()
+        ssl_ctx = None if verify_ssl else _NO_VERIFY_SSL
 
         for attempt in range(self.MAX_RETRIES):
             try:
                 await self._rate_limit(domain)
-                async with session.get(url, params=params) as response:
+                async with session.get(
+                    url, params=params, headers=headers, ssl=ssl_ctx
+                ) as response:
                     if response.status == 200:
                         text = await response.text()
                         logger.debug(json.dumps({
                             "event": "http_success",
                             "url": url,
                             "status": response.status,
-                            "attempt": attempt + 1,
                         }))
                         return text
                     elif response.status == 429:
@@ -127,25 +151,35 @@ class HttpClient:
         }))
         return None
 
-    async def get_json(self, url: str, params: Optional[dict] = None) -> Optional[Any]:
+    async def get_json(
+        self,
+        url: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        verify_ssl: bool = True,
+    ) -> Optional[Any]:
         """
         Fetch URL and return parsed JSON.
-        Returns None on failure.
+        Pass verify_ssl=False for sites with self-signed certificates.
         """
         domain = self._get_domain(url)
         session = await self._get_session()
+        ssl_ctx = None if verify_ssl else _NO_VERIFY_SSL
+        json_headers = {"Accept": "application/json, text/plain, */*"}
+        if headers:
+            json_headers.update(headers)
 
         for attempt in range(self.MAX_RETRIES):
             try:
                 await self._rate_limit(domain)
-                headers = {**self._headers, "Accept": "application/json"}
-                async with session.get(url, params=params, headers=headers) as response:
+                async with session.get(
+                    url, params=params, headers=json_headers, ssl=ssl_ctx
+                ) as response:
                     if response.status == 200:
                         data = await response.json(content_type=None)
                         logger.debug(json.dumps({
                             "event": "json_success",
                             "url": url,
-                            "attempt": attempt + 1,
                         }))
                         return data
                     elif response.status == 429:
@@ -183,7 +217,6 @@ class HttpClient:
         return None
 
     async def close(self) -> None:
-        """Close the underlying aiohttp session."""
         if self._session and not self._session.closed:
             await self._session.close()
 

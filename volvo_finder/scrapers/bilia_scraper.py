@@ -10,7 +10,7 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-_SEARCH_URL = "https://www.bilia.se/bilar/begagnade/"
+_SEARCH_URL = "https://www.bilia.se/begagnade-bilar/"
 _SEARCH_PARAMS = {
     "make": "Volvo",
     "models": "V60,V90,XC60",

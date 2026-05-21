@@ -8,17 +8,20 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-# Volvo Selekt API endpoints to try
+# Volvo Selekt — try known API endpoints in order
 _API_URLS = [
-    "https://selekt.volvocars.se/api/cars",
+    "https://api.volvocars.com/selekt/v1/vehicles",
+    "https://selekt.volvocars.se/api/search",
     "https://www.volvocars.com/api/used-cars/v1/vehicles",
 ]
 _FALLBACK_HTML_URL = "https://selekt.volvocars.se/se/cars"
 
 _API_PARAMS = {
     "country": "SE",
+    "market": "SE",
     "make": "Volvo",
     "pageSize": "50",
+    "status": "forsale",
 }
 
 _MODEL_PATTERNS = {

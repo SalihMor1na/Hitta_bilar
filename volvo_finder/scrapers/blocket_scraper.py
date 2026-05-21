@@ -14,8 +14,18 @@ _DEFAULT_PARAMS = {
     "cg": "1020",   # Cars category
     "st": "s",       # Sell
     "lim": "60",
+    "include": "extend_with_shipping",
 }
 _SEARCH_QUERIES = ["volvo v60", "volvo v90", "volvo xc60"]
+
+# Blocket API requires these headers to return results
+_BLOCKET_API_HEADERS = {
+    "Origin": "https://www.blocket.se",
+    "Referer": "https://www.blocket.se/bilar/personbilar",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+}
 
 _FEATURE_MAP = {
     "panoramatak": "panoramatak",
@@ -115,9 +125,18 @@ class BlocketScraper(BaseScraper):
                     except json.JSONDecodeError:
                         data = None
                 else:
-                    data = await self.http_client.get_json(_API_URL, params=params)
+                    data = await self.http_client.get_json(
+                        _API_URL, params=params, headers=_BLOCKET_API_HEADERS
+                    )
                     if data is not None:
                         self.cache.set(cache_key, json.dumps(data))
+                    else:
+                        self.logger.warning(json.dumps({
+                            "event": "blocket_api_empty",
+                            "query": query,
+                            "page": page,
+                            "hint": "API returned None — may need session token",
+                        }))
 
                 if not data:
                     break

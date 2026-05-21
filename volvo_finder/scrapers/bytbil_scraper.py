@@ -10,12 +10,11 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-_SEARCH_URL = "https://www.bytbil.com/bilar"
+_SEARCH_URL = "https://www.bytbil.com/begagnade-bilar/volvo"
 _DEFAULT_PARAMS = {
-    "makes": "VOLVO",
     "models": "V60,XC60,V90",
-    "maxPrice": "300000",
-    "yearMin": "2018",
+    "priceMax": "300000",
+    "yearFrom": "2018",
 }
 
 _MODEL_PATTERNS = {

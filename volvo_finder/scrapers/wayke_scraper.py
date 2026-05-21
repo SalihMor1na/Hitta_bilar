@@ -8,12 +8,14 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-_API_URL = "https://api.wayke.se/v1/vehicles"
+# Wayke exposes a public search API used by their frontend
+_API_URL = "https://api.wayke.se/search/v2/vehicles"
 _SEARCH_PARAMS = {
     "make": "Volvo",
     "priceMax": "300000",
     "yearMin": "2018",
     "pageSize": "50",
+    "condition": "used",
 }
 _MODELS = ["V60", "V90", "XC60"]
 

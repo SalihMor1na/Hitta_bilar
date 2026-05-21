@@ -11,9 +11,9 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 
 _SEARCH_URLS = [
-    "https://www.bilweb.se/bilar/volvo/v60/",
-    "https://www.bilweb.se/bilar/volvo/v90/",
-    "https://www.bilweb.se/bilar/volvo/xc60/",
+    "https://www.bilweb.se/begagnade-bilar/volvo/v60/",
+    "https://www.bilweb.se/begagnade-bilar/volvo/v90/",
+    "https://www.bilweb.se/begagnade-bilar/volvo/xc60/",
 ]
 
 _MODEL_PATTERNS = {

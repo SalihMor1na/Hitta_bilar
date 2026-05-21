@@ -97,6 +97,18 @@ class BilhallScraper(BaseScraper):
     def __init__(self, http_client: HttpClient, cache: Cache) -> None:
         super().__init__(http_client, cache)
 
+    async def check_robots_txt(self) -> bool:
+        # Override to pass ssl=False since bilhall uses a self-signed certificate
+        from urllib.robotparser import RobotFileParser
+        from urllib.parse import urljoin
+        robots_url = urljoin(self.BASE_URL, "/robots.txt")
+        text = await self.http_client.get_text(robots_url, verify_ssl=False)
+        if text is None:
+            return True
+        parser = RobotFileParser()
+        parser.parse(text.splitlines())
+        return parser.can_fetch("*", self.BASE_URL)
+
     async def fetch(self) -> list[dict]:
         """Fetch Bilhall listings with pagination."""
         all_items: list[dict] = []
@@ -109,7 +121,8 @@ class BilhallScraper(BaseScraper):
             if cached is not None:
                 html = cached
             else:
-                html = await self.http_client.get_text(url, params=params)
+                # bilhall.se uses a self-signed certificate
+                html = await self.http_client.get_text(url, params=params, verify_ssl=False)
                 if html:
                     self.cache.set(cache_key, html)
 
