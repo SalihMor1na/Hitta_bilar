@@ -1,0 +1,8 @@
+# Volvo Finder - Cron example
+# Run every 6 hours (at 0:00, 6:00, 12:00, 18:00)
+# Edit with: crontab -e
+
+0 */6 * * * /usr/bin/python3 /home/user/Hitta_bilar/volvo_finder/main.py >> /var/log/volvo_finder.log 2>&1
+
+# Alternative: run with virtual environment
+# 0 */6 * * * /home/user/Hitta_bilar/.venv/bin/python /home/user/Hitta_bilar/volvo_finder/main.py >> /var/log/volvo_finder.log 2>&1

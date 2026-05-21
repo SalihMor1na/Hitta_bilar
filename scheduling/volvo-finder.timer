@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Volvo Finder every 6 hours
+Requires=volvo-finder.service
+
+[Timer]
+# Run every 6 hours
+OnCalendar=*-*-* 00,06,12,18:00:00
+# Also run once shortly after boot if missed
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
