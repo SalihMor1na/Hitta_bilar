@@ -42,7 +42,7 @@ class HttpClient:
         self._domain_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def _get_session(self) -> AsyncSession:
-        if self._session is None or self._session.closed:
+        if self._session is None or self._session._closed:
             self._session = AsyncSession(
                 impersonate="chrome124",
                 headers=_BROWSER_HEADERS,
@@ -167,7 +167,7 @@ class HttpClient:
             pass
 
     async def close(self) -> None:
-        if self._session and not self._session.closed:
+        if self._session and not self._session._closed:
             await self._session.close()
 
     async def __aenter__(self) -> "HttpClient":
