@@ -11,9 +11,9 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 
 _SEARCH_URLS = [
-    "https://www.kvdbil.se/sv-SE/sok?q=volvo+v60&fuelType=DIESEL,PHEV",
-    "https://www.kvdbil.se/sv-SE/sok?q=volvo+v90&fuelType=DIESEL,PHEV",
-    "https://www.kvdbil.se/sv-SE/sok?q=volvo+xc60&fuelType=DIESEL,PHEV",
+    "https://www.kvd.se/sv-SE/sok?q=volvo+v60&fuelType=DIESEL,PHEV",
+    "https://www.kvd.se/sv-SE/sok?q=volvo+v90&fuelType=DIESEL,PHEV",
+    "https://www.kvd.se/sv-SE/sok?q=volvo+xc60&fuelType=DIESEL,PHEV",
 ]
 
 _MODEL_PATTERNS = {
@@ -93,7 +93,7 @@ def _extract_features(text: str) -> tuple[set[str], Optional[str]]:
 
 class KvdbilScraper(BaseScraper):
     NAME = "kvdbil"
-    BASE_URL = "https://www.kvdbil.se"
+    BASE_URL = "https://www.kvd.se"
 
     def __init__(self, http_client: HttpClient, cache: Cache) -> None:
         super().__init__(http_client, cache)

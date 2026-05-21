@@ -1,4 +1,4 @@
-"""Bytbil.com scraper using BeautifulSoup4 HTML parsing."""
+"""Bytbil.com scraper using __NEXT_DATA__ extraction with HTML card fallback."""
 import json
 import re
 from typing import Optional
@@ -9,6 +9,7 @@ from models.car import Car
 from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
+from utils.nextjs import extract_next_data, find_listings_in_next_data
 
 _WARMUP_URL = "https://www.bytbil.com/"
 
@@ -135,6 +136,23 @@ class BytbilScraper(BaseScraper):
                     }))
                     break
 
+                # Try __NEXT_DATA__ first (Bytbil is a Next.js app)
+                next_data = None
+                try:
+                    next_data = extract_next_data(html)
+                except Exception:
+                    pass
+
+                if next_data:
+                    listings = find_listings_in_next_data(next_data)
+                    if listings:
+                        all_items.extend(listings)
+                        if len(listings) < 20:
+                            break
+                        page += 1
+                        continue
+
+                # Fall back to HTML card parsing
                 soup = BeautifulSoup(html, "html.parser")
                 cards = (
                     soup.select("article.car-list-card")

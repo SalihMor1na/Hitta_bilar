@@ -132,7 +132,12 @@ class BlocketScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch all Volvo listings from Blocket using public HTML + __NEXT_DATA__."""
+        """Fetch all Volvo listings from Blocket.
+
+        Tries the /mobility/search/car endpoint as JSON first (it may return
+        structured data when Accept: application/json is sent), then falls back
+        to HTML + __NEXT_DATA__ extraction.
+        """
         await self.http_client.warm_up(_WARMUP_URL)
 
         all_items: list[dict] = []
@@ -141,12 +146,36 @@ class BlocketScraper(BaseScraper):
                 params = {**_SEARCH_PARAMS, "q": model, "page": str(page)}
                 cache_key = f"blocket:{model}:page{page}"
                 cached = self.cache.get(cache_key)
+
+                html = None
                 if cached is not None:
                     html = cached
                 else:
-                    html = await self.http_client.get_text(
-                        _BASE_SEARCH_URL, params=params
+                    # Try JSON first — Blocket's search endpoint may support it
+                    json_data = await self.http_client.get_json(
+                        _BASE_SEARCH_URL,
+                        params=params,
+                        headers={"Accept": "application/json, text/html;q=0.9, */*;q=0.8"},
                     )
+                    if json_data and isinstance(json_data, (dict, list)):
+                        # Got JSON — wrap as a pseudo-item for parse()
+                        items = (
+                            json_data.get("data") or json_data.get("listings") or
+                            json_data.get("ads") or json_data.get("items") or
+                            (json_data if isinstance(json_data, list) else [])
+                        )
+                        if items:
+                            self.logger.info(json.dumps({
+                                "event": "blocket_json_success", "model": model,
+                                "page": page, "count": len(items),
+                            }))
+                            all_items.extend(items)
+                            if len(items) < 20:
+                                break
+                            continue
+
+                    # Fall back to HTML
+                    html = await self.http_client.get_text(_BASE_SEARCH_URL, params=params)
                     if html:
                         self.cache.set(cache_key, html)
 

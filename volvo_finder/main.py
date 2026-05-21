@@ -94,7 +94,7 @@ def generate_report(cars: list[Car], previous: list[Car]) -> None:
     """Generate a Markdown report with new, gone, and price-drop cars."""
     report_path = Path("volvo_report.md")
 
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now_str = datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     prev_by_url: dict[str, Car] = {c.url: c for c in previous}
     prev_by_vin: dict[str, Car] = {c.vin: c for c in previous if c.vin}
@@ -196,7 +196,7 @@ async def main() -> None:
     setup_logging()
     logger = logging.getLogger("main")
 
-    logger.info(json.dumps({"event": "run_start", "time": datetime.utcnow().isoformat()}))
+    logger.info(json.dumps({"event": "run_start", "time": datetime.now(datetime.UTC).isoformat()}))
 
     async with HttpClient(settings) as http_client:
         cache = Cache(settings)
