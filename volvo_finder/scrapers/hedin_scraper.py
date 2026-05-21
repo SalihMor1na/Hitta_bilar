@@ -10,7 +10,8 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-_SEARCH_URL = "https://www.hedinbil.se/fordon/begagnade/"
+_SEARCH_URL = "https://www.hedinbil.se/sok/"
+_WARMUP_URL = "https://www.hedinbil.se/"
 _SEARCH_PARAMS = {
     "make": "Volvo",
     "model": "V60,V90,XC60",
@@ -103,6 +104,9 @@ class HedinScraper(BaseScraper):
 
     async def fetch(self) -> list[dict]:
         """Fetch Hedin Bil listings with pagination."""
+        # Warm up to establish session cookies
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
         page = 1
         while True:

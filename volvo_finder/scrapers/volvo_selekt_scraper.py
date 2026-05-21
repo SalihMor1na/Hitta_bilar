@@ -1,4 +1,4 @@
-"""Volvo Selekt (Official Used Cars) scraper."""
+"""Volvo Selekt (Official Used Cars) scraper — HTML-first with __NEXT_DATA__."""
 import json
 import re
 from typing import Optional
@@ -7,14 +7,18 @@ from models.car import Car
 from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
+from utils.nextjs import extract_next_data, find_listings_in_next_data
 
-# Volvo Selekt — try known API endpoints in order
+# HTML page — try __NEXT_DATA__ first
+_HTML_URL = "https://selekt.volvocars.se/se/cars"
+_WARMUP_URL = "https://selekt.volvocars.se/"
+
+# Fallback API endpoints to try if HTML yields nothing
 _API_URLS = [
     "https://api.volvocars.com/selekt/v1/vehicles",
     "https://selekt.volvocars.se/api/search",
     "https://www.volvocars.com/api/used-cars/v1/vehicles",
 ]
-_FALLBACK_HTML_URL = "https://selekt.volvocars.se/se/cars"
 
 _API_PARAMS = {
     "country": "SE",
@@ -107,63 +111,97 @@ class VolvoSelektScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Try Volvo Selekt API, fall back to HTML scraping."""
+        """Try Volvo Selekt HTML page (__NEXT_DATA__), fall back to API."""
+        # Warm up to establish session cookies
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
 
-        # Try API endpoints first
-        for api_url in _API_URLS:
-            page = 1
-            while True:
-                params = {**_API_PARAMS, "page": str(page)}
-                cache_key = f"{api_url}?page={page}"
-                cached = self.cache.get(cache_key)
-                if cached is not None:
-                    try:
-                        data = json.loads(cached)
-                    except json.JSONDecodeError:
-                        data = None
-                else:
-                    data = await self.http_client.get_json(api_url, params=params)
-                    if data is not None:
-                        self.cache.set(cache_key, json.dumps(data))
-
-                if not data:
-                    break
-
-                # Handle various response structures
-                vehicles = (
-                    data.get("vehicles")
-                    or data.get("cars")
-                    or data.get("items")
-                    or data.get("data")
-                    or (data if isinstance(data, list) else [])
-                )
-
-                if not vehicles:
-                    break
-
-                all_items.extend(vehicles if isinstance(vehicles, list) else [])
-
-                total = data.get("totalCount") or data.get("total") or 0
-                page_size = int(_API_PARAMS.get("pageSize", 50))
-                if page * page_size >= total or len(vehicles) < page_size:
-                    break
-                page += 1
-
-            if all_items:
-                break  # Successfully fetched from first working API
-
-        # If API fails, try HTML scraping
-        if not all_items:
-            cached = self.cache.get(_FALLBACK_HTML_URL)
-            if cached is not None:
-                html = cached
-            else:
-                html = await self.http_client.get_text(_FALLBACK_HTML_URL)
-                if html:
-                    self.cache.set(_FALLBACK_HTML_URL, html)
+        # Primary: fetch HTML and extract __NEXT_DATA__
+        cached = self.cache.get(_HTML_URL)
+        if cached is not None:
+            html = cached
+        else:
+            html = await self.http_client.get_text(_HTML_URL)
             if html:
+                self.cache.set(_HTML_URL, html)
+
+        if html:
+            try:
+                next_data = extract_next_data(html)
+            except Exception as e:
+                self.logger.warning(json.dumps({
+                    "event": "volvo_selekt_next_data_error",
+                    "error": str(e),
+                }))
+                next_data = None
+
+            if next_data:
+                listings = find_listings_in_next_data(next_data)
+                if listings:
+                    all_items.extend(listings)
+                else:
+                    self.logger.info(json.dumps({
+                        "event": "volvo_selekt_no_listings_in_next_data",
+                        "hint": "No car listings found in __NEXT_DATA__",
+                    }))
+            else:
+                self.logger.info(json.dumps({
+                    "event": "volvo_selekt_no_next_data",
+                    "hint": "__NEXT_DATA__ not found — page may be JS-rendered",
+                }))
+
+            # Also try generic HTML card parsing if __NEXT_DATA__ didn't work
+            if not all_items:
                 all_items.append({"_html": html, "_source": "html"})
+        else:
+            self.logger.warning(json.dumps({
+                "event": "volvo_selekt_html_empty",
+                "hint": "No HTML returned from selekt.volvocars.se",
+            }))
+
+        # Fallback: try API endpoints if HTML yielded nothing
+        if not all_items:
+            for api_url in _API_URLS:
+                page = 1
+                while True:
+                    params = {**_API_PARAMS, "page": str(page)}
+                    cache_key = f"{api_url}?page={page}"
+                    cached = self.cache.get(cache_key)
+                    if cached is not None:
+                        try:
+                            data = json.loads(cached)
+                        except json.JSONDecodeError:
+                            data = None
+                    else:
+                        data = await self.http_client.get_json(api_url, params=params)
+                        if data is not None:
+                            self.cache.set(cache_key, json.dumps(data))
+
+                    if not data:
+                        break
+
+                    vehicles = (
+                        data.get("vehicles")
+                        or data.get("cars")
+                        or data.get("items")
+                        or data.get("data")
+                        or (data if isinstance(data, list) else [])
+                    )
+
+                    if not vehicles:
+                        break
+
+                    all_items.extend(vehicles if isinstance(vehicles, list) else [])
+
+                    total = data.get("totalCount") or data.get("total") or 0
+                    page_size = int(_API_PARAMS.get("pageSize", 50))
+                    if page * page_size >= total or len(vehicles) < page_size:
+                        break
+                    page += 1
+
+                if all_items:
+                    break
 
         return all_items
 

@@ -1,4 +1,4 @@
-"""Wayke.se scraper using their public vehicle search API."""
+"""Wayke.se scraper using their public vehicle search API with HTML fallback."""
 import json
 import re
 from typing import Optional
@@ -7,9 +7,15 @@ from models.car import Car
 from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
+from utils.nextjs import extract_next_data, find_listings_in_next_data
 
-# Wayke exposes a public search API used by their frontend
-_API_URL = "https://api.wayke.se/search/v2/vehicles"
+# Try these API endpoints in order
+_API_URLS_TO_TRY = [
+    "https://api.wayke.se/vehicles",
+    "https://api.wayke.se/search/vehicles",
+    "https://api.wayke.se/v1/search",
+]
+
 _SEARCH_PARAMS = {
     "make": "Volvo",
     "priceMax": "300000",
@@ -18,6 +24,7 @@ _SEARCH_PARAMS = {
     "condition": "used",
 }
 _MODELS = ["V60", "V90", "XC60"]
+_WARMUP_URL = "https://www.wayke.se/"
 
 _FEATURE_KEYWORDS = {
     "panoramatak": "panoramatak",
@@ -76,38 +83,94 @@ class WaykeScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch Volvo listings from Wayke API, paginating through models."""
+        """Fetch Volvo listings from Wayke, trying multiple API URLs then HTML fallback."""
+        # Warm up to establish session cookies
+        await self.http_client.warm_up(_WARMUP_URL)
+
         all_items: list[dict] = []
-        for model in _MODELS:
-            page = 1
-            while True:
-                params = {**_SEARCH_PARAMS, "model": model, "page": str(page)}
-                cache_key = f"{_API_URL}?model={model}&page={page}"
+
+        # Try each API endpoint
+        for api_url in _API_URLS_TO_TRY:
+            if all_items:
+                break
+            for model in _MODELS:
+                page = 1
+                while True:
+                    params = {**_SEARCH_PARAMS, "model": model, "page": str(page)}
+                    cache_key = f"{api_url}?model={model}&page={page}"
+                    cached = self.cache.get(cache_key)
+                    if cached is not None:
+                        try:
+                            data = json.loads(cached)
+                        except json.JSONDecodeError:
+                            data = None
+                    else:
+                        data = await self.http_client.get_json(api_url, params=params)
+                        if data is not None:
+                            self.cache.set(cache_key, json.dumps(data))
+
+                    if not data:
+                        break
+
+                    # Wayke API response format: {"vehicles": [...], "totalCount": N}
+                    vehicles = data.get("vehicles") or data.get("items") or data.get("data") or []
+                    if not vehicles:
+                        break
+                    all_items.extend(vehicles)
+
+                    total = data.get("totalCount") or data.get("total_count") or 0
+                    page_size = int(_SEARCH_PARAMS["pageSize"])
+                    if page * page_size >= total or len(vehicles) < page_size:
+                        break
+                    page += 1
+
+        # HTML fallback: try __NEXT_DATA__ from public search page
+        if not all_items:
+            for model in _MODELS:
+                html_url = f"https://www.wayke.se/hitta-bil?q=volvo+{model.lower()}"
+                cache_key = f"wayke_html:{html_url}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
-                    try:
-                        data = json.loads(cached)
-                    except json.JSONDecodeError:
-                        data = None
+                    html = cached
                 else:
-                    data = await self.http_client.get_json(_API_URL, params=params)
-                    if data is not None:
-                        self.cache.set(cache_key, json.dumps(data))
+                    html = await self.http_client.get_text(html_url)
+                    if html:
+                        self.cache.set(cache_key, html)
 
-                if not data:
-                    break
+                if not html:
+                    self.logger.info(json.dumps({
+                        "event": "wayke_html_empty",
+                        "model": model,
+                        "hint": "No HTML returned — site may need JS",
+                    }))
+                    continue
 
-                # Wayke API response format: {"vehicles": [...], "totalCount": N}
-                vehicles = data.get("vehicles") or data.get("items") or data.get("data") or []
-                if not vehicles:
-                    break
-                all_items.extend(vehicles)
+                try:
+                    next_data = extract_next_data(html)
+                except Exception as e:
+                    self.logger.warning(json.dumps({
+                        "event": "wayke_next_data_error",
+                        "model": model,
+                        "error": str(e),
+                    }))
+                    next_data = None
 
-                total = data.get("totalCount") or data.get("total_count") or 0
-                page_size = int(_SEARCH_PARAMS["pageSize"])
-                if page * page_size >= total or len(vehicles) < page_size:
-                    break
-                page += 1
+                if next_data:
+                    listings = find_listings_in_next_data(next_data)
+                    if listings:
+                        all_items.extend(listings)
+                    else:
+                        self.logger.info(json.dumps({
+                            "event": "wayke_no_listings_in_next_data",
+                            "model": model,
+                            "hint": "No car listings found in __NEXT_DATA__",
+                        }))
+                else:
+                    self.logger.info(json.dumps({
+                        "event": "wayke_no_next_data",
+                        "model": model,
+                        "hint": "__NEXT_DATA__ not found — page may be JS-rendered",
+                    }))
 
         return all_items
 
