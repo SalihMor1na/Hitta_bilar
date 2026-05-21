@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
 
+    # Slack notifications (optional)
+    SLACK_WEBHOOK_URL: Optional[str] = None
+
     # Email notifications (optional)
     SMTP_HOST: Optional[str] = None
     SMTP_PORT: int = 587
