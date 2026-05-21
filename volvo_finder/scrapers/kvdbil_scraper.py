@@ -11,11 +11,10 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 
 _SEARCH_URLS = [
-    "https://www.kvd.se/sv-SE/auktion/personbil?q=volvo+v60",
-    "https://www.kvd.se/sv-SE/auktion/personbil?q=volvo+v90",
-    "https://www.kvd.se/sv-SE/auktion/personbil?q=volvo+xc60",
+    "https://www.kvdbil.se/sv-SE/sok?q=volvo+v60&fuelType=DIESEL,PHEV",
+    "https://www.kvdbil.se/sv-SE/sok?q=volvo+v90&fuelType=DIESEL,PHEV",
+    "https://www.kvdbil.se/sv-SE/sok?q=volvo+xc60&fuelType=DIESEL,PHEV",
 ]
-_WARMUP_URL = "https://www.kvd.se/"
 
 _MODEL_PATTERNS = {
     "V60": re.compile(r"\bV60\b", re.IGNORECASE),
@@ -94,16 +93,13 @@ def _extract_features(text: str) -> tuple[set[str], Optional[str]]:
 
 class KvdbilScraper(BaseScraper):
     NAME = "kvdbil"
-    BASE_URL = "https://www.kvd.se"
+    BASE_URL = "https://www.kvdbil.se"
 
     def __init__(self, http_client: HttpClient, cache: Cache) -> None:
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
         """Fetch KVD Bil listings for each model search."""
-        # Warm up to establish session cookies
-        await self.http_client.warm_up(_WARMUP_URL)
-
         all_items: list[dict] = []
         for search_url in _SEARCH_URLS:
             page = 1

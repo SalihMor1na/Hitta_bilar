@@ -10,13 +10,13 @@ from scrapers.base_scraper import BaseScraper
 from utils.cache import Cache
 from utils.http_client import HttpClient
 
-_SEARCH_URL = "https://www.hedinbil.se/sok/"
+_SEARCH_URL = "https://www.hedinbil.se/bilar/begagnade/"
 _WARMUP_URL = "https://www.hedinbil.se/"
+_SEARCH_MODELS = ["v60", "v90", "xc60"]
 _SEARCH_PARAMS = {
-    "make": "Volvo",
-    "model": "V60,V90,XC60",
-    "maxPrice": "300000",
-    "yearFrom": "2018",
+    "marke": "Volvo",
+    "maxPris": "300000",
+    "arsmodellFran": "2018",
 }
 
 _MODEL_PATTERNS = {
@@ -104,33 +104,36 @@ class HedinScraper(BaseScraper):
 
     async def fetch(self) -> list[dict]:
         """Fetch Hedin Bil listings with pagination."""
-        # Warm up to establish session cookies
         await self.http_client.warm_up(_WARMUP_URL)
 
         all_items: list[dict] = []
-        page = 1
-        while True:
-            params = {**_SEARCH_PARAMS, "page": str(page)}
-            cache_key = f"{_SEARCH_URL}?page={page}"
-            cached = self.cache.get(cache_key)
-            if cached is not None:
-                html = cached
-            else:
-                html = await self.http_client.get_text(_SEARCH_URL, params=params)
-                if html:
-                    self.cache.set(cache_key, html)
+        for model in _SEARCH_MODELS:
+            page = 1
+            while True:
+                params = {**_SEARCH_PARAMS, "modell": model, "sida": str(page)}
+                cache_key = f"hedin:{model}:page{page}"
+                cached = self.cache.get(cache_key)
+                if cached is not None:
+                    html = cached
+                else:
+                    html = await self.http_client.get_text(_SEARCH_URL, params=params)
+                    if html:
+                        self.cache.set(cache_key, html)
 
-            if not html:
-                self.logger.warning(json.dumps({"event": "fetch_empty", "scraper": self.NAME, "page": page}))
-                break
+                if not html:
+                    self.logger.warning(json.dumps({
+                        "event": "fetch_empty", "scraper": self.NAME,
+                        "model": model, "page": page,
+                    }))
+                    break
 
-            all_items.append({"html": html, "base_url": self.BASE_URL})
+                all_items.append({"html": html, "base_url": self.BASE_URL})
 
-            soup = BeautifulSoup(html, "html.parser")
-            next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
-            if not next_btn or page >= 15:
-                break
-            page += 1
+                soup = BeautifulSoup(html, "html.parser")
+                next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
+                if not next_btn or page >= 15:
+                    break
+                page += 1
 
         return all_items
 
@@ -150,7 +153,10 @@ class HedinScraper(BaseScraper):
                 )
 
                 if not cards:
-                    self.logger.warning(json.dumps({"event": "no_cards", "scraper": self.NAME}))
+                    self.logger.info(json.dumps({
+                        "event": "no_cards", "scraper": self.NAME,
+                        "html_snippet": soup.body.get_text(" ", strip=True)[:300] if soup.body else "",
+                    }))
                     continue
 
                 for card in cards:

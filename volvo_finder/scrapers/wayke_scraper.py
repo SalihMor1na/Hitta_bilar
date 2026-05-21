@@ -1,7 +1,9 @@
-"""Wayke.se scraper using their public vehicle search API with HTML fallback."""
+"""Wayke.se scraper using public HTML search pages."""
 import json
 import re
 from typing import Optional
+
+from bs4 import BeautifulSoup
 
 from models.car import Car
 from scrapers.base_scraper import BaseScraper
@@ -9,22 +11,15 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 from utils.nextjs import extract_next_data, find_listings_in_next_data
 
-# Try these API endpoints in order
-_API_URLS_TO_TRY = [
-    "https://api.wayke.se/vehicles",
-    "https://api.wayke.se/search/vehicles",
-    "https://api.wayke.se/v1/search",
-]
-
+# Public search URL — same as any browser
+_BASE_SEARCH_URL = "https://www.wayke.se/hitta-bil"
+_MODELS = ["v60", "v90", "xc60"]
+_WARMUP_URL = "https://www.wayke.se/"
 _SEARCH_PARAMS = {
-    "make": "Volvo",
+    "makes": "Volvo",
     "priceMax": "300000",
     "yearMin": "2018",
-    "pageSize": "50",
-    "condition": "used",
 }
-_MODELS = ["V60", "V90", "XC60"]
-_WARMUP_URL = "https://www.wayke.se/"
 
 _FEATURE_KEYWORDS = {
     "panoramatak": "panoramatak",
@@ -83,94 +78,73 @@ class WaykeScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch Volvo listings from Wayke, trying multiple API URLs then HTML fallback."""
-        # Warm up to establish session cookies
+        """Fetch Volvo listings from Wayke using public HTML search."""
         await self.http_client.warm_up(_WARMUP_URL)
 
         all_items: list[dict] = []
 
-        # Try each API endpoint
-        for api_url in _API_URLS_TO_TRY:
-            if all_items:
-                break
-            for model in _MODELS:
-                page = 1
-                while True:
-                    params = {**_SEARCH_PARAMS, "model": model, "page": str(page)}
-                    cache_key = f"{api_url}?model={model}&page={page}"
-                    cached = self.cache.get(cache_key)
-                    if cached is not None:
-                        try:
-                            data = json.loads(cached)
-                        except json.JSONDecodeError:
-                            data = None
-                    else:
-                        data = await self.http_client.get_json(api_url, params=params)
-                        if data is not None:
-                            self.cache.set(cache_key, json.dumps(data))
-
-                    if not data:
-                        break
-
-                    # Wayke API response format: {"vehicles": [...], "totalCount": N}
-                    vehicles = data.get("vehicles") or data.get("items") or data.get("data") or []
-                    if not vehicles:
-                        break
-                    all_items.extend(vehicles)
-
-                    total = data.get("totalCount") or data.get("total_count") or 0
-                    page_size = int(_SEARCH_PARAMS["pageSize"])
-                    if page * page_size >= total or len(vehicles) < page_size:
-                        break
-                    page += 1
-
-        # HTML fallback: try __NEXT_DATA__ from public search page
-        if not all_items:
-            for model in _MODELS:
-                html_url = f"https://www.wayke.se/hitta-bil?q=volvo+{model.lower()}"
-                cache_key = f"wayke_html:{html_url}"
+        for model in _MODELS:
+            page = 1
+            while page <= 10:
+                params = {**_SEARCH_PARAMS, "models": model.upper(), "page": str(page)}
+                cache_key = f"wayke:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
                     html = cached
                 else:
-                    html = await self.http_client.get_text(html_url)
+                    html = await self.http_client.get_text(_BASE_SEARCH_URL, params=params)
                     if html:
                         self.cache.set(cache_key, html)
 
                 if not html:
-                    self.logger.info(json.dumps({
-                        "event": "wayke_html_empty",
-                        "model": model,
-                        "hint": "No HTML returned — site may need JS",
+                    self.logger.warning(json.dumps({
+                        "event": "wayke_fetch_empty", "model": model, "page": page,
                     }))
-                    continue
+                    break
 
+                # Try __NEXT_DATA__ first
+                next_data = None
                 try:
                     next_data = extract_next_data(html)
-                except Exception as e:
-                    self.logger.warning(json.dumps({
-                        "event": "wayke_next_data_error",
-                        "model": model,
-                        "error": str(e),
-                    }))
-                    next_data = None
+                except Exception:
+                    pass
 
                 if next_data:
                     listings = find_listings_in_next_data(next_data)
                     if listings:
                         all_items.extend(listings)
-                    else:
-                        self.logger.info(json.dumps({
-                            "event": "wayke_no_listings_in_next_data",
-                            "model": model,
-                            "hint": "No car listings found in __NEXT_DATA__",
-                        }))
-                else:
+                        if len(listings) < 20:
+                            break
+                        page += 1
+                        continue
                     self.logger.info(json.dumps({
-                        "event": "wayke_no_next_data",
-                        "model": model,
-                        "hint": "__NEXT_DATA__ not found — page may be JS-rendered",
+                        "event": "wayke_no_listings_in_next_data", "model": model,
                     }))
+
+                # Fall back to HTML card parsing
+                soup = BeautifulSoup(html, "html.parser")
+                cards = (
+                    soup.select("[class*='vehicle-card']")
+                    or soup.select("[class*='car-card']")
+                    or soup.select("article[class*='vehicle']")
+                    or soup.select("[data-testid*='vehicle']")
+                    or soup.select("[data-testid*='car']")
+                    or soup.select("li.hit")
+                )
+                if not cards:
+                    self.logger.info(json.dumps({
+                        "event": "wayke_no_cards", "model": model, "page": page,
+                        "html_snippet": soup.body.get_text(" ", strip=True)[:300] if soup.body else "",
+                    }))
+                    break
+
+                for card in cards:
+                    all_items.append({"_html": str(card), "_base_url": self.BASE_URL})
+
+                next_btn = soup.select_one("a[rel='next']") or soup.select_one("[aria-label*='nästa']")
+                if not next_btn:
+                    break
+                page += 1
 
         return all_items
 
@@ -178,15 +152,51 @@ class WaykeScraper(BaseScraper):
         parsed = []
         for item in raw_data:
             try:
-                # Wayke vehicle fields
+                # HTML card fallback
+                if item.get("_html"):
+                    soup = BeautifulSoup(item["_html"], "html.parser")
+                    base_url = item.get("_base_url", self.BASE_URL)
+                    full_text = soup.get_text(" ", strip=True)
+                    model = None
+                    for m in ["V60", "V90", "XC60"]:
+                        if m.lower() in full_text.lower():
+                            model = m
+                            break
+                    if not model:
+                        continue
+                    link_el = soup.select_one("a[href]")
+                    href = link_el["href"] if link_el else ""
+                    if href and not href.startswith("http"):
+                        href = base_url + href
+                    price_el = soup.select_one("[class*='price']")
+                    price_sek = int(re.sub(r"[^\d]", "", price_el.get_text()) if price_el else "0") or 0
+                    year = 0
+                    m_yr = re.search(r"(20\d{2}|19\d{2})", full_text)
+                    if m_yr:
+                        year = int(m_yr.group(1))
+                    mileage_mil = 0.0
+                    m_mil = re.search(r"(\d[\d\s]*)\s*mil", full_text, re.IGNORECASE)
+                    if m_mil:
+                        raw_mil = re.sub(r"[^\d,.]", "", m_mil.group(0)).replace(",", ".")
+                        mileage_mil = float(raw_mil) if raw_mil else 0.0
+                    fuel = _detect_fuel(full_text)
+                    features, audio_system = _extract_features(full_text)
+                    parsed.append({
+                        "source": self.NAME, "url": href, "model": model,
+                        "year": year, "price_sek": price_sek, "mileage_mil": mileage_mil,
+                        "fuel": fuel, "features": features, "audio_system": audio_system,
+                        "title": f"Volvo {model} {year}",
+                    })
+                    continue
+
+                # Wayke vehicle fields (from __NEXT_DATA__)
                 make = str(item.get("make") or item.get("manufacturer") or "")
                 if "volvo" not in make.lower():
                     continue
 
                 model_raw = str(item.get("model") or item.get("modelName") or "")
-                # Map to allowed models
                 model = None
-                for m in _MODELS:
+                for m in ["V60", "V90", "XC60"]:
                     if m.lower() in model_raw.lower():
                         model = m
                         break
@@ -196,31 +206,24 @@ class WaykeScraper(BaseScraper):
                 price_sek = int(item.get("price") or item.get("sellingPrice") or 0)
                 year = int(item.get("modelYear") or item.get("year") or 0)
 
-                # Mileage may be in km or mil
                 mileage_raw = item.get("mileage") or item.get("odometer") or 0
-                mileage_km = float(mileage_raw)
-                # Wayke typically uses km; convert to mil
-                mileage_mil = mileage_km / 10.0
+                mileage_mil = float(mileage_raw) / 10.0
 
                 fuel = _detect_fuel(str(item.get("fuelType") or item.get("fuel") or ""))
                 color = item.get("color") or item.get("exteriorColor")
                 gearbox = item.get("gearbox") or item.get("transmission")
                 vin = item.get("vin") or item.get("registrationNumber")
 
-                # Feature extraction from description + equipment list
                 equipment = item.get("equipment") or item.get("features") or []
                 equip_text = " ".join(str(e) for e in equipment) if isinstance(equipment, list) else str(equipment)
                 description = str(item.get("description") or "")
-                full_text = f"{equip_text} {description}"
-                features, audio_system = _extract_features(full_text)
+                features, audio_system = _extract_features(f"{equip_text} {description}")
 
                 url = (
                     item.get("url")
                     or item.get("shareUrl")
                     or f"https://www.wayke.se/bil/{item.get('id', '')}"
                 )
-
-                title = f"Volvo {model} {year}"
 
                 parsed.append({
                     "source": self.NAME,
@@ -233,7 +236,7 @@ class WaykeScraper(BaseScraper):
                     "features": features,
                     "audio_system": audio_system,
                     "vin": vin,
-                    "title": title,
+                    "title": f"Volvo {model} {year}",
                     "color": color,
                     "gearbox": gearbox,
                 })

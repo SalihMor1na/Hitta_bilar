@@ -12,22 +12,19 @@ from utils.http_client import HttpClient
 
 _WARMUP_URL = "https://www.bytbil.com/"
 
-# Try these URL patterns in order — use whichever returns listings
-_SEARCH_URLS_TO_TRY = [
-    "https://www.bytbil.com/bilar/volvo/v60",
-    "https://www.bytbil.com/bilar/volvo/v90",
-    "https://www.bytbil.com/bilar/volvo/xc60",
-    "https://www.bytbil.com/sok?make=Volvo&model=V60",
-    "https://www.bytbil.com/sok?make=Volvo&model=V90",
-    "https://www.bytbil.com/sok?make=Volvo&model=XC60",
-]
-
-# Legacy fallback
-_SEARCH_URL = "https://www.bytbil.com/begagnade-bilar/volvo"
-_DEFAULT_PARAMS = {
-    "models": "V60,XC60,V90",
-    "priceMax": "300000",
-    "yearFrom": "2018",
+# Correct search URL — verified directly in Chrome by user
+_BASE_SEARCH_URL = "https://www.bytbil.com/bil"
+_SEARCH_MODELS = ["v60", "v90", "xc60"]
+_BASE_PARAMS = {
+    "VehicleType": "bil",
+    "Makes": "Volvo",
+    "PriceRange.To": "300000",
+    "ModelYearRange.From": "2018",
+    "ModelYearRange.To": "2027",
+    "MilageRange.From": "0",
+    "MilageRange.To": "16000",
+    "SortParams.SortField": "publishedDate",
+    "SortParams.IsAscending": "False",
 }
 
 _MODEL_PATTERNS = {
@@ -113,81 +110,31 @@ class BytbilScraper(BaseScraper):
         super().__init__(http_client, cache)
 
     async def fetch(self) -> list[dict]:
-        """Fetch car listings from Bytbil, trying multiple URL patterns."""
-        # Warm up to establish session cookies
+        """Fetch car listings from Bytbil using the correct search URL."""
         await self.http_client.warm_up(_WARMUP_URL)
 
         all_items: list[dict] = []
 
-        # Try each URL pattern and collect results from whichever works
-        for search_url in _SEARCH_URLS_TO_TRY:
+        for model in _SEARCH_MODELS:
             page = 1
-            found_any = False
             while True:
-                url = search_url if page == 1 else f"{search_url}{'&' if '?' in search_url else '?'}page={page}"
-                cache_key = f"bytbil:{url}"
+                params = {**_BASE_PARAMS, "FreeText": model, "Page": str(page)}
+                cache_key = f"bytbil:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
                     html = cached
                 else:
-                    html = await self.http_client.get_text(url)
+                    html = await self.http_client.get_text(_BASE_SEARCH_URL, params=params)
                     if html:
                         self.cache.set(cache_key, html)
 
                 if not html:
-                    self.logger.warning(json.dumps({"event": "fetch_empty", "scraper": self.NAME, "url": url}))
-                    break
-
-                soup = BeautifulSoup(html, "html.parser")
-
-                # Find car listing cards — Bytbil uses article or div.car-list-card
-                cards = (
-                    soup.select("article.car-list-card")
-                    or soup.select("div.car-list-card")
-                    or soup.select("[data-testid='car-card']")
-                    or soup.select("article[class*='car']")
-                    or soup.select("li.hit")
-                )
-
-                if not cards:
                     self.logger.warning(json.dumps({
-                        "event": "no_cards_found",
-                        "scraper": self.NAME,
-                        "url": url,
+                        "event": "fetch_empty", "scraper": self.NAME,
+                        "model": model, "page": page,
                     }))
                     break
 
-                found_any = True
-                for card in cards:
-                    all_items.append({"html": str(card), "base_url": self.BASE_URL})
-
-                # Check for next page
-                next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
-                if not next_btn or page >= 20:
-                    break
-                page += 1
-
-            # If this URL pattern worked, skip remaining patterns for this model
-            if found_any:
-                continue
-
-        # Fallback: legacy URL with params if nothing worked
-        if not all_items:
-            page = 1
-            while True:
-                params = {**_DEFAULT_PARAMS, "page": str(page)}
-                cache_key = f"{_SEARCH_URL}?page={page}"
-                cached = self.cache.get(cache_key)
-                if cached is not None:
-                    html = cached
-                else:
-                    html = await self.http_client.get_text(_SEARCH_URL, params=params)
-                    if html:
-                        self.cache.set(cache_key, html)
-
-                if not html:
-                    break
-
                 soup = BeautifulSoup(html, "html.parser")
                 cards = (
                     soup.select("article.car-list-card")
@@ -195,15 +142,26 @@ class BytbilScraper(BaseScraper):
                     or soup.select("[data-testid='car-card']")
                     or soup.select("article[class*='car']")
                     or soup.select("li.hit")
+                    or soup.select("div[class*='vehicle-card']")
+                    or soup.select("div[class*='result-item']")
                 )
 
                 if not cards:
+                    self.logger.info(json.dumps({
+                        "event": "no_cards_found", "scraper": self.NAME,
+                        "model": model, "page": page,
+                        "html_snippet": soup.body.get_text(" ", strip=True)[:300] if soup.body else "",
+                    }))
                     break
 
                 for card in cards:
                     all_items.append({"html": str(card), "base_url": self.BASE_URL})
 
-                next_btn = soup.select_one("a[rel='next']") or soup.select_one(".pagination__next")
+                next_btn = (
+                    soup.select_one("a[rel='next']")
+                    or soup.select_one(".pagination__next")
+                    or soup.select_one("[aria-label='Nästa sida']")
+                )
                 if not next_btn or page >= 20:
                     break
                 page += 1
@@ -217,7 +175,6 @@ class BytbilScraper(BaseScraper):
                 soup = BeautifulSoup(item["html"], "html.parser")
                 base_url = item.get("base_url", self.BASE_URL)
 
-                # Extract title
                 title_el = (
                     soup.select_one("h2.car-list-card__title")
                     or soup.select_one("h2[class*='title']")
@@ -230,14 +187,12 @@ class BytbilScraper(BaseScraper):
                 if not model:
                     continue
 
-                # Extract URL
                 link_el = soup.select_one("a[href]")
                 href = link_el["href"] if link_el else ""
                 if href and not href.startswith("http"):
                     href = base_url + href
                 url = href or ""
 
-                # Extract price
                 price_el = (
                     soup.select_one("[class*='price']")
                     or soup.select_one("span.price")
@@ -245,7 +200,6 @@ class BytbilScraper(BaseScraper):
                 price_text = price_el.get_text(strip=True) if price_el else "0"
                 price_sek = _parse_price(price_text)
 
-                # Extract year
                 year = 0
                 year_el = soup.select_one("[class*='year']")
                 if year_el:
@@ -257,17 +211,14 @@ class BytbilScraper(BaseScraper):
                     if m:
                         year = int(m.group(1))
 
-                # Extract mileage
                 mileage_mil = 0.0
                 mil_el = soup.select_one("[class*='mileage']") or soup.select_one("[class*='mil']")
                 if mil_el:
                     mileage_mil = _parse_mileage(mil_el.get_text(strip=True))
 
-                # Extract fuel
                 fuel_el = soup.select_one("[class*='fuel']") or soup.select_one("[class*='drivmedel']")
                 fuel = _detect_fuel(fuel_el.get_text(strip=True) if fuel_el else title)
 
-                # Features from full card text
                 full_text = soup.get_text(" ", strip=True)
                 features, audio_system = _extract_features(full_text)
 

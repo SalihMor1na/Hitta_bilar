@@ -9,11 +9,18 @@ from utils.cache import Cache
 from utils.http_client import HttpClient
 from utils.nextjs import extract_next_data, find_listings_in_next_data
 
-# Blocket public search URLs — no auth required, same as any browser sees
+# Blocket public search — /mobility/search/car is the correct endpoint (verified in browser)
 _SEARCH_MODELS = ["v60", "v90", "xc60"]
-_BASE_SEARCH_URL = "https://www.blocket.se/bilar/personbilar/volvo"
+_BASE_SEARCH_URL = "https://www.blocket.se/mobility/search/car"
 _WARMUP_URL = "https://www.blocket.se/"
 _MAX_PAGES = 5
+
+# Query params matching what the browser sends (filter applied server-side)
+_SEARCH_PARAMS = {
+    "mileage_to": "16000",
+    "price_to": "300000",
+    "year_from": "2018",
+}
 
 _FEATURE_MAP = {
     "panoramatak": "panoramatak",
@@ -78,7 +85,6 @@ def _extract_features(parameters: list[dict]) -> tuple[set[str], Optional[str]]:
         for kw, feat in _FEATURE_MAP.items():
             if kw.lower() in combined:
                 features.add(feat)
-        # Detect audio
         if "bowers" in combined or "b&w" in combined:
             audio_system = "Bowers & Wilkins"
         elif "harman" in combined:
@@ -87,10 +93,7 @@ def _extract_features(parameters: list[dict]) -> tuple[set[str], Optional[str]]:
 
 
 def _find_listings(data: dict) -> list[dict]:
-    """
-    Try multiple known paths in __NEXT_DATA__ to locate car listings.
-    Falls back to recursive search via find_listings_in_next_data.
-    """
+    """Try multiple known paths in __NEXT_DATA__ to locate car listings."""
     # Path 1: dehydratedState queries
     try:
         listings = (
@@ -130,14 +133,13 @@ class BlocketScraper(BaseScraper):
 
     async def fetch(self) -> list[dict]:
         """Fetch all Volvo listings from Blocket using public HTML + __NEXT_DATA__."""
-        # Warm up to establish session cookies
         await self.http_client.warm_up(_WARMUP_URL)
 
         all_items: list[dict] = []
         for model in _SEARCH_MODELS:
             for page in range(1, _MAX_PAGES + 1):
-                params = {"q": model, "st": "s", "cg": "1020", "page": str(page)}
-                cache_key = f"{_BASE_SEARCH_URL}?q={model}&page={page}"
+                params = {**_SEARCH_PARAMS, "q": model, "page": str(page)}
+                cache_key = f"blocket:{model}:page{page}"
                 cached = self.cache.get(cache_key)
                 if cached is not None:
                     html = cached
@@ -153,11 +155,9 @@ class BlocketScraper(BaseScraper):
                         "event": "blocket_fetch_empty",
                         "model": model,
                         "page": page,
-                        "hint": "No HTML returned — site may need JS or is blocking",
                     }))
                     break
 
-                # Extract __NEXT_DATA__
                 try:
                     next_data = extract_next_data(html)
                 except Exception as e:
@@ -184,13 +184,11 @@ class BlocketScraper(BaseScraper):
                         "event": "blocket_no_listings",
                         "model": model,
                         "page": page,
-                        "hint": "No car listings found in __NEXT_DATA__",
                     }))
                     break
 
                 all_items.extend(listings)
 
-                # If we got fewer listings than expected, assume last page
                 if len(listings) < 20:
                     break
 
@@ -202,13 +200,11 @@ class BlocketScraper(BaseScraper):
         for item in raw_data:
             try:
                 subject = item.get("subject", "") or item.get("title", "") or ""
-                # Filter to only Volvo listings
                 if "volvo" not in subject.lower():
                     continue
 
                 model = _detect_model(subject)
                 if model is None:
-                    # Try parameters
                     for p in item.get("parameters", []):
                         if p.get("label", "").lower() in ("modell", "model"):
                             model = _detect_model(str(p.get("value", "")))
@@ -254,7 +250,6 @@ class BlocketScraper(BaseScraper):
                         gearbox = value
 
                 features, audio_system = _extract_features(parameters)
-                # Also scan description/body
                 body = item.get("body", "") or item.get("description", "") or ""
                 for kw, feat in _FEATURE_MAP.items():
                     if kw.lower() in body.lower():
