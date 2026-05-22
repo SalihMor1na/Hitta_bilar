@@ -38,17 +38,20 @@ class FilterService:
 
     def has_required_features(self, car: Car) -> bool:
         """
-        Must have: panoramatak, backkamera/360kamera, skinnstolar, blis.
-        If features set is empty (search cards don't list equipment), allow through.
+        MUST have: skinnstolar + panoramatak + (backkamera OR 360kamera).
+        Blis and audio systems are scoring bonuses only, not requirements.
+
+        The sentinel "enrichment_done" is added by scrapers that fetch individual
+        listing detail pages. If present, apply the strict check. If absent,
+        we have no equipment data and allow the car through (lenient mode).
         """
-        if not car.features:
-            return True  # No feature data available — can't filter
+        if "enrichment_done" not in car.features:
+            return True  # Scraper didn't fetch detail page — can't filter
         features = {f.lower() for f in car.features}
         has_pano = any("panorama" in f for f in features)
         has_camera = any("backkamera" in f or "360" in f for f in features)
         has_leather = any("skinn" in f for f in features)
-        has_blis = any("blis" in f for f in features)
-        return has_pano and has_camera and has_leather and has_blis
+        return has_pano and has_camera and has_leather
 
     def passes_hard_filters(self, car: Car) -> bool:
         """Return True if car passes all hard filter criteria."""
@@ -56,7 +59,7 @@ class FilterService:
             return False
         if car.year < self.criteria.MIN_YEAR:
             return False
-        if car.price_sek > self.criteria.MAX_PRICE_SEK:
+        if car.price_sek and car.price_sek > self.criteria.MAX_PRICE_SEK:
             return False
         if not self.is_allowed_fuel(car):
             return False

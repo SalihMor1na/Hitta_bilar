@@ -95,9 +95,16 @@ class BaseScraper(ABC):
         """Normalize intermediate dicts to Car dataclass instances."""
         ...
 
+    async def enrich(self, cars: list[Car]) -> list[Car]:
+        """
+        Optional: fetch individual listing pages to add equipment/feature data.
+        Default is a no-op. Override in scrapers where search cards omit features.
+        """
+        return cars
+
     async def scrape(self) -> list[Car]:
         """
-        Main entry point: check robots, fetch, parse, normalize.
+        Main entry point: check robots, fetch, parse, normalize, enrich.
         Per-scraper try/except — never propagates exceptions.
         """
         try:
@@ -112,6 +119,7 @@ class BaseScraper(ABC):
             raw = await self.fetch()
             parsed = self.parse(raw)
             cars = self.normalize(parsed)
+            cars = await self.enrich(cars)
             self.logger.info(json.dumps({
                 "event": "scraper_done",
                 "scraper": self.NAME,

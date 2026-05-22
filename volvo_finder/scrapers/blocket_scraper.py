@@ -1,4 +1,5 @@
 """Blocket.se scraper using Playwright for JS-rendered search results."""
+import asyncio
 import json
 import re
 import urllib.parse
@@ -11,6 +12,7 @@ from scrapers.base_scraper import BaseScraper
 from utils.browser_client import fetch_rendered_html
 from utils.cache import Cache
 from utils.http_client import HttpClient
+from utils.nextjs import extract_next_data
 
 # Blocket public search — /mobility/search/car is the correct endpoint (verified in browser)
 _SEARCH_MODELS = ["v60", "v90", "xc60"]
@@ -182,8 +184,13 @@ class BlocketScraper(BaseScraper):
                     soup.select_one("[class*='price']")
                     or soup.select_one("[class*='Price']")
                 )
-                price_text = price_el.get_text(strip=True) if price_el else "0"
+                price_text = price_el.get_text(strip=True) if price_el else ""
                 price_sek = int(re.sub(r"[^\d]", "", price_text) or "0")
+                if not price_sek:
+                    # CSS class names are minified — fall back to text regex "229 000 kr"
+                    m_p = re.search(r"(\d[\d\s]{2,})\s*kr", full_text)
+                    if m_p:
+                        price_sek = int(re.sub(r"[^\d]", "", m_p.group(1)) or "0")
 
                 year = 0
                 m_yr = re.search(r"(20\d{2}|19\d{2})", full_text)
@@ -236,3 +243,112 @@ class BlocketScraper(BaseScraper):
                 title=d.get("title"),
             ))
         return cars
+
+    async def enrich(self, cars: list[Car]) -> list[Car]:
+        """
+        Fetch each Blocket listing's detail page to get the equipment list.
+        Blocket search cards don't include equipment — only the detail page does.
+        Uses HTTP first (SSR pages); falls back to Playwright if needed.
+        Runs up to 5 fetches concurrently. Results are cached 6h.
+        """
+        sem = asyncio.Semaphore(5)
+
+        async def _enrich_one(car: Car) -> Car:
+            if not car.url:
+                return car
+            async with sem:
+                cache_key = f"blocket:detail:{car.url}"
+                html = self.cache.get(cache_key)
+                if not html:
+                    html = await self.http_client.get_text(car.url)
+                    if html:
+                        self.cache.set(cache_key, html)
+                # Always mark enrichment attempted so the filter knows to be strict
+                car.features.add("enrichment_done")
+                if not html:
+                    return car
+                features, audio, price, fuel = self._parse_detail_page(html)
+                car.features |= features
+                if audio and not car.audio_system:
+                    car.audio_system = audio
+                if price and not car.price_sek:
+                    car.price_sek = price
+                if fuel and car.fuel == "okänd":
+                    car.fuel = fuel
+                self.logger.debug(json.dumps({
+                    "event": "blocket_enriched",
+                    "url": car.url,
+                    "features": sorted(car.features - {"enrichment_done"}),
+                    "price": car.price_sek,
+                }))
+            return car
+
+        return list(await asyncio.gather(*[_enrich_one(c) for c in cars]))
+
+    def _parse_detail_page(self, html: str) -> tuple[set[str], Optional[str], int, str]:
+        """
+        Extract features, audio system, price, and fuel from a Blocket detail page.
+        Returns (features, audio_system, price_sek, fuel).
+        """
+        features: set[str] = set()
+        audio_system: Optional[str] = None
+        price_sek: int = 0
+        fuel: str = "okänd"
+
+        # Try __NEXT_DATA__ first (Blocket detail pages are Next.js SSR)
+        next_data = extract_next_data(html)
+        ad = self._find_ad_in_next_data(next_data) if next_data else None
+
+        if ad:
+            full_text = self._ad_to_text(ad)
+            features, audio_system = _extract_features_from_text(full_text)
+            fuel = _detect_fuel(full_text)
+
+            # Price from structured data
+            price_raw = ad.get("price", {})
+            if isinstance(price_raw, dict):
+                price_sek = int(price_raw.get("value", 0) or price_raw.get("amount", 0) or 0)
+            elif isinstance(price_raw, (int, float)):
+                price_sek = int(price_raw)
+        else:
+            # Fall back to full-page text scan
+            soup = BeautifulSoup(html, "html.parser")
+            equip_section = soup.find(
+                lambda tag: tag.name in ("section", "div", "ul")
+                and "utrustning" in (tag.get_text() or "").lower()
+            )
+            text = equip_section.get_text(" ", strip=True) if equip_section else soup.get_text(" ", strip=True)
+            features, audio_system = _extract_features_from_text(text)
+            fuel = _detect_fuel(text)
+            # Price regex: "229 000 kr"
+            m = re.search(r"(\d[\d\s]{2,})\s*kr", text)
+            if m:
+                price_sek = int(re.sub(r"[^\d]", "", m.group(1)) or "0")
+
+        return features, audio_system, price_sek, fuel
+
+    def _find_ad_in_next_data(self, data: dict) -> Optional[dict]:
+        """Locate the ad/listing dict in Blocket __NEXT_DATA__."""
+        for path_fn in [
+            lambda d: d["props"]["pageProps"]["ad"],
+            lambda d: d["props"]["pageProps"]["listing"],
+            lambda d: d["props"]["pageProps"]["data"],
+            lambda d: d["props"]["pageProps"]["initialData"]["ad"],
+        ]:
+            try:
+                result = path_fn(data)
+                if isinstance(result, dict):
+                    return result
+            except (KeyError, TypeError):
+                pass
+        return None
+
+    def _ad_to_text(self, ad: dict) -> str:
+        """Flatten a Blocket ad dict into a single searchable text blob."""
+        parts = [
+            str(ad.get("subject", "")),
+            str(ad.get("body", "") or ad.get("description", "")),
+        ]
+        for p in ad.get("parameters", []) or []:
+            parts.append(f"{p.get('label', '')} {p.get('value', '')}")
+        return " ".join(parts)

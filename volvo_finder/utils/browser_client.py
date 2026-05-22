@@ -31,12 +31,51 @@ async def fetch_rendered_html(
         }))
         return None
 
+    # Cookie consent button selectors — tried in order, first match wins
+    _CONSENT_SELECTORS = [
+        "#onetrust-accept-btn-handler",
+        ".onetrust-accept-btn-handler",
+        "button[id*='accept-all']",
+        "button[id*='acceptAll']",
+        "button[class*='accept-all']",
+        "button[class*='acceptAll']",
+        "[data-testid*='accept']",
+        "button[title*='Acceptera alla']",
+        "button[title*='Accept all']",
+    ]
+    _CONSENT_TEXTS = ["Acceptera alla", "Godkänn alla", "Accept all", "Acceptera", "Tillåt alla"]
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         context = await browser.new_context(locale="sv-SE")
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+            # Try to dismiss cookie consent dialog (2 second window)
+            await asyncio.sleep(1.5)
+            for sel in _CONSENT_SELECTORS:
+                try:
+                    btn = await page.query_selector(sel)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(1.0)
+                        logger.debug(json.dumps({"event": "cookie_consent_dismissed", "selector": sel, "url": url}))
+                        break
+                except Exception:
+                    pass
+            else:
+                # Try text-based matching as fallback
+                for text in _CONSENT_TEXTS:
+                    try:
+                        btn = page.locator(f"button:has-text('{text}')").first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click()
+                            await asyncio.sleep(1.0)
+                            logger.debug(json.dumps({"event": "cookie_consent_dismissed", "text": text, "url": url}))
+                            break
+                    except Exception:
+                        pass
 
             if wait_selector:
                 try:
